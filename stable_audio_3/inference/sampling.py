@@ -311,7 +311,34 @@ def sample_flow_pingpong(model, x, sigmas, callback=None, disable_tqdm=False, **
     Args:
         sigmas: Pre-computed schedule tensor. Shape (steps+1,) for global schedule
             or (batch_size, steps+1) for per-element schedules.
+
+    Optional latent-prefix continuation extras (popped from extra_args):
+        fixed_prefix_data: [B, C, T] clean latent values to pin under the mask.
+        fixed_prefix_mask: [B, 1, T] 1 = fixed prefix token, 0 = generated.
+        fixed_prefix_noise: [B, C, T] optional fixed noise path; randn_like if omitted.
     """
+    fixed_prefix_data = extra_args.pop("fixed_prefix_data", None)
+    fixed_prefix_mask = extra_args.pop("fixed_prefix_mask", None)
+    fixed_prefix_noise = extra_args.pop("fixed_prefix_noise", None)
+
+    if fixed_prefix_data is not None:
+        fixed_prefix_data = fixed_prefix_data.to(device=x.device, dtype=x.dtype)
+        if fixed_prefix_noise is None:
+            fixed_prefix_noise = torch.randn_like(fixed_prefix_data)
+        else:
+            fixed_prefix_noise = fixed_prefix_noise.to(device=x.device, dtype=x.dtype)
+        fixed_prefix_mask = fixed_prefix_mask.to(device=x.device, dtype=x.dtype)
+
+    def impose_prefix(cur_x, t_value):
+        if fixed_prefix_data is None:
+            return cur_x
+        if isinstance(t_value, torch.Tensor) and t_value.ndim >= 1:
+            t_broadcast = t_value.view(-1, 1, 1).to(cur_x.dtype)
+        else:
+            t_broadcast = t_value
+        prefix_x = fixed_prefix_data * (1 - t_broadcast) + fixed_prefix_noise * t_broadcast
+        return cur_x * (1 - fixed_prefix_mask) + prefix_x * fixed_prefix_mask
+
     t = sigmas
 
     # Check if we have per-element schedules (batch_size, steps+1) or global schedule (steps+1,)
@@ -319,6 +346,11 @@ def sample_flow_pingpong(model, x, sigmas, callback=None, disable_tqdm=False, **
 
     t = t.to(x.device)
     num_steps = t.shape[-1] - 1
+
+    # Initialize the prefix region with the correctly-noised source at t[0].
+    if fixed_prefix_data is not None:
+        t0 = t[:, 0] if per_element_schedule else t[0]
+        x = impose_prefix(x, t0)
 
     for i in trange(num_steps, disable=disable_tqdm):
         if per_element_schedule:
@@ -343,10 +375,15 @@ def sample_flow_pingpong(model, x, sigmas, callback=None, disable_tqdm=False, **
 
         denoised = x - t_curr_broadcast * model(x, t_curr_tensor, **extra_args)
 
+        # Force the denoised prediction to agree with the clean prefix.
+        if fixed_prefix_data is not None:
+            denoised = denoised * (1 - fixed_prefix_mask) + fixed_prefix_data * fixed_prefix_mask
+
         if callback is not None:
             callback({'x': x, 'i': i, 't': t_curr, 'sigma': t_curr, 'sigma_hat': t_curr, 'denoised': denoised})
 
         x = (1 - t_next_broadcast) * denoised + t_next_broadcast * torch.randn_like(x)
+        x = impose_prefix(x, t_next)
 
     return x
 

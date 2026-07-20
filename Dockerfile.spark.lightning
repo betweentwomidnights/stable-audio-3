@@ -1,0 +1,12 @@
+# Thin layer on sa3:spark adding the upstream Lightning training deps.
+# sa3:spark predates the upstream LoRA->PyTorch-Lightning rewrite; its venv
+# lacks pytorch_lightning + wandb (a top-level import in training/utils.py).
+# Use `uv pip install` against the existing venv ONLY -- never `uv sync`,
+# which reconciles the lockfile and clobbers the manually-installed cu128
+# Blackwell torch (see SPARK_NOTES / memory). torch 2.7.1 already satisfies
+# pytorch_lightning's torch>=2.1, so it is not touched here.
+FROM sa3:spark
+RUN uv pip install --python /opt/sa3-venv/bin/python \
+        "pytorch_lightning==2.5.5" wandb \
+ && /opt/sa3-venv/bin/python -c "import pytorch_lightning, wandb, torch; \
+print('pl', pytorch_lightning.__version__, '| torch', torch.__version__, torch.version.cuda)"

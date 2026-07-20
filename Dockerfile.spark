@@ -1,0 +1,122 @@
+# syntax=docker/dockerfile:1.7
+#
+# Dockerfile.spark — Stable Audio 3 build tuned for NVIDIA DGX Spark
+#
+# Target hardware:
+#   - NVIDIA GB10 (Blackwell, compute capability sm_121)
+#   - Linux aarch64
+#   - Host CUDA driver 13.0 (forward-compatible with CUDA 12.x runtime)
+#
+# Why this file exists separately from upstream's `uv sync` flow:
+#
+#   1. pyproject.toml pins torch/torchaudio to the cu126 PyTorch index, but only via
+#      a marker `platform_machine == 'x86_64'`. On aarch64 that marker is false, so
+#      uv silently falls back to PyPI which serves a CPU-only build. We override
+#      torch/torchaudio with the cu128 wheels (cu128 includes Blackwell SASS for
+#      sm_120/sm_121; cu126 does not).
+#
+#   2. flash-attn has no prebuilt aarch64 wheels — must compile from source. We pin
+#      TORCH_CUDA_ARCH_LIST to the Spark's compute capability and run with
+#      MAX_JOBS=1 to avoid thermal-induced host crashes during template
+#      instantiation. (See SPARK_NOTES.md #3.)
+#
+# Run mode (development): the repo is bind-mounted into /workspace/sa3 at runtime;
+# the venv lives at /opt/sa3-venv so the bind-mount does not clobber it.
+#
+# Example:
+#   docker build -f Dockerfile.spark -t sa3:spark .
+#   docker run --rm -it --gpus all \
+#       -v "$PWD":/workspace/sa3 \
+#       -v "$HOME/.cache/huggingface":/cache/huggingface \
+#       -p 7860:7860 sa3:spark
+#
+# Inside the container:
+#   uv run python run_gradio.py --model medium
+#   uv run pytest
+
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/sa3-venv \
+    VIRTUAL_ENV=/opt/sa3-venv \
+    HF_HOME=/cache/huggingface \
+    TORCH_CUDA_ARCH_LIST="12.1+PTX" \
+    MAX_JOBS=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3.10-dev \
+        git curl ca-certificates \
+        build-essential ninja-build \
+        libsndfile1 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (Astral) — installer drops the binary at /root/.local/bin/uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/opt/sa3-venv/bin:/root/.local/bin:${PATH}"
+
+WORKDIR /workspace/sa3
+
+# Stage manifest only so the heavy install layer caches independently of source edits.
+COPY pyproject.toml uv.lock ./
+
+# Create the venv up front and pin Python 3.10 (matches .python-version).
+RUN uv venv --python 3.10 ${UV_PROJECT_ENVIRONMENT}
+
+# Phase 1: sync base deps from the lockfile, skipping torch/torchaudio. They get
+# installed separately below from cu128. We do `uv sync` first (rather than
+# installing torch first and syncing afterwards) because `uv sync` defaults to
+# --exact and would remove a manually-placed cu128 torch as "extraneous" —
+# `--no-install-package` only skips the install, not the cleanup.
+# `--no-install-project` skips installing this repo itself; source is
+# bind-mounted at runtime.
+RUN uv sync --no-install-project \
+        --no-install-package torch \
+        --no-install-package torchaudio
+
+# Phase 2: install Spark-compatible torch from cu128 (Blackwell SASS for
+# sm_120/sm_121; cu126 — what pyproject pins for x86_64 — does not include it).
+RUN uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1 torchaudio==2.7.1
+
+# Phase 3a: seed flash-attn's build deps. flash-attn 2.x uses a legacy setup.py
+# build and doesn't declare its requirements; combined with pyproject's
+# `no-build-isolation-package = ["flash-attn"]` the build runs against the
+# project venv. The upstream `flash-attn` extra ships ninja and pip but not
+# setuptools/wheel/packaging — add them explicitly. (See SPARK_NOTES.md #1.)
+RUN uv pip install setuptools wheel packaging ninja
+
+# Phase 3b: build flash-attn against the cu128 torch + sm_121 arch. We use
+# `uv pip install --no-build-isolation` here rather than `uv sync --extra
+# flash-attn` because sync would reconcile the venv against the lockfile and
+# silently uninstall our cu128 torch (the lockfile's aarch64 entries point at
+# PyPI's CPU torch). `uv pip install` just adds flash-attn against the venv
+# we've staged. (See SPARK_NOTES.md #2.)
+# This layer takes a while (serial build at MAX_JOBS=1; expect 30–60 min on
+# Spark — slower than MAX_JOBS≥2 but avoids the thermal crash documented in
+# SPARK_NOTES.md #3).
+RUN uv pip install --no-build-isolation flash-attn
+
+# Phase 4: install transformers. Upstream's pyproject.toml does not list it as a
+# dependency, but stable_audio_3/models/conditioners.py imports
+# T5GemmaEncoderModel, AutoTokenizer, AutoConfig from transformers when the
+# T5Gemma text conditioner is constructed at model-load time. Without this,
+# `python run_gradio.py --model medium` blows up after the HF download with
+# `ModuleNotFoundError: No module named 'transformers'`. (See SPARK_NOTES.md #4.)
+# We use `uv pip install` (not `uv sync`) so this can't trigger the cu128 torch
+# uninstall trap from Issue #2 / #3.
+RUN uv pip install transformers
+
+# Sanity check at build time — fails the build if flash-attn linked against the
+# wrong torch, transformers is missing T5Gemma support, or anything didn't install.
+# Comment out if you want the image regardless.
+RUN python -c "import torch, flash_attn, transformers; \
+    print('torch', torch.__version__, 'cuda', torch.version.cuda, 'flash_attn', flash_attn.__version__, 'transformers', transformers.__version__); \
+    from flash_attn import flash_attn_func; print('flash_attn_func ok:', flash_attn_func); \
+    from transformers import T5GemmaEncoderModel; print('T5GemmaEncoderModel ok:', T5GemmaEncoderModel)"
+
+EXPOSE 7860
+
+CMD ["bash"]

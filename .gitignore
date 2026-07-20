@@ -168,3 +168,13 @@ wandb/*
 .DS_Store
 *.safetensors
 .claude
+# Spark training artifacts (large / local-only)
+sa3_training_latents*/
+sa3_training_patch_latents*/
+lora_out_*/
+*.ckpt
+*.safetensors
+*.wav
+*.mp3
+*.log
+*.log.id

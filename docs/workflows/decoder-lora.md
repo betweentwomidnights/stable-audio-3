@@ -284,6 +284,35 @@ published checkpoint the ladder favoured step 3000–4000; step 2000 was chosen 
 re-encode behaviour and on ears. **Screen candidates on re-encode depth and on
 percussion-dense material, not on the ladder alone.**
 
+### The metric gap at low re-encode depth
+
+The benefit scales with depth. Tonal frames (>12 dB tonality, 6–16 kHz) on
+2-minute generations, mean of 4, the adapter the only variable:
+
+| depth | stock | adapted | |
+|---|---|---|---|
+| d0 — fresh generation | 363 | 422 | −16% |
+| d1 — one transform or continuation | 431 | 450 | −4% |
+| d2 | 823 | 518 | **37% fewer** |
+| d3 | 1664 | 615 | **63% fewer** |
+
+**The squeak is audible at d0 by ear — hi hats and snares especially — and none
+of the metrics here show it.** Flat or slightly negative at d0: tonality p95 in
+6–16 kHz and 1–8 kHz, frame counts over 10/12/15 dB, onset-locked tonality
+excess, fp32 and fp16, two DiT LoRAs, 30 s and 120 s material.
+
+The measurement has no headroom there. About 640 of ~10,300 frames already read
+as tonal before any re-encoding, because cymbals and distorted guitar genuinely
+are tonal, so a few dozen added squeak frames cannot move a count that size.
+Separating artifact from content works at depth but not at d0 without a clean
+reference, and generated audio has none.
+
+Combined with the tonality detector's habit of pointing the wrong way — on SAME-S
+the clip that sounds squeakiest scores lowest — the practical rule is: **judge
+low-depth behaviour by ear, and use the metrics for depth.** If you can devise a
+reference-free measure of HF transient artifacts on generated audio, it would
+improve every screen in this document.
+
 ### Measurement floors — read before trusting small deltas
 
 Neither half of the autoencoder is bit-deterministic:

@@ -12,10 +12,9 @@ percent against base on identical prompts, so adapter-specific latents buy
 nothing -- what the LoRAs change is how much HF content is present, not how
 well-formed the latent is.
 
-Usage (in the sa3 container, from /workspace/sa3):
-  SA3_USE_CACHED_PRERELEASE=1 /opt/sa3-venv/bin/python \
-      scripts/gen_dit_latents.py --out_dir /out/dit_latents --n 64 \
-      --prompt_pool /app/prompts/defaults.json
+Usage:
+  python scripts/gen_dit_latents.py --out_dir out/dit_latents --n 64 \
+      --prompt_pool prompts.json
 """
 
 import argparse
@@ -28,10 +27,6 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import _sa3_prerelease  # noqa: E402
-
-_sa3_prerelease.install()
 
 from stable_audio_3 import StableAudioModel  # noqa: E402
 

@@ -12,6 +12,7 @@ will happily accept a state dict whose every key misses, leaving a
 correctly-shaped, correctly-counted, all-zero adapter that does nothing.
 """
 
+import sys
 from functools import partial
 
 import pytest
@@ -313,3 +314,46 @@ def test_save_dtype_fp32_round_trips_exactly(tmp_path):
     for k, v in sd.items():
         assert reloaded[k].dtype == torch.float32
         torch.testing.assert_close(reloaded[k], v, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# shipped scripts import
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "train_decoder_lora.py",
+        "gen_dit_latents.py",
+        "_decoder_lora_losses.py",
+        "_decoder_lora_eval.py",
+    ],
+)
+def test_decoder_lora_scripts_import(script):
+    """Every shipped script must import on a clean checkout.
+
+    Ruff does not resolve imports, so a module that exists only in a working
+    tree -- a local shim, a probe left behind -- passes lint and then fails at
+    the first line for anyone else. That is exactly how `gen_dit_latents.py`
+    shipped importing a machine-specific helper that was never committed.
+    """
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    path = root / "scripts" / script
+    assert path.exists(), f"{script} missing"
+
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import runpy, sys; sys.argv=['{script}', '--help']; "
+            f"runpy.run_path({str(path)!r}, run_name='not_main')",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=root,
+    )
+    assert r.returncode == 0, f"{script} failed to import:\n{r.stderr}"

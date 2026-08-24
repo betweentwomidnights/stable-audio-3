@@ -225,6 +225,34 @@ Two things to know when reading the number:
   bucket composition within a run. A rise that follows the `g` count in the log
   is the mix, not the adapter degrading.
 
+#### What it buys, and where to measure it
+
+Comb excess in dB over a control comb at meaningless spacing, mean of 4
+generations. The same latents were decoded through each adapter, so the decoder
+is the only variable:
+
+| variant | comb excess | vs stock |
+|---|---|---|
+| stock | 2.80 | — |
+| `--lambda_patch 0`, strength 1 | 13.70 | **+10.90** |
+| `--lambda_patch 30`, strength 1 | 1.97 | **−0.83** |
+| `--lambda_patch 0`, +3 round trips | 13.34 | +10.54 |
+| `--lambda_patch 30`, +3 round trips | 1.37 | **−1.43** |
+| `--lambda_patch 0`, strength 2 | 18.52 | +15.72 |
+| `--lambda_patch 30`, strength 2 | 3.49 | **+0.68** |
+
+Without the term the adapter adds ~11 dB of comb and holds it under re-encoding.
+With it, the adapter sits at or slightly below stock, and is still within 0.7 dB
+of stock at strength 2 — double what it ships at, where every effect is 2–4×
+clearer.
+
+**Measure this on audio the model generated, not on real audio pushed round the
+autoencoder.** They are different distributions and the artifact does not behave
+the same on both: on real music the penalised adapter measures +1.5 to +4 dB of
+comb excess where on model output it is at or below stock. Model output is what
+the decoder is actually asked to render, and it is where the artifact is audible
+under stem separation — which is how it was found in the first place.
+
 ### `--tonality_bands`
 
 Where the tonality penalty looks. The default three sub-bands all sit at 6 kHz and

@@ -39,9 +39,10 @@ EPS = 1e-10
 def cmag(Z):
     """Magnitude of a complex tensor WITHOUT complex .abs().
 
-    On GB10, complex abs() dispatches to an nvrtc-JIT'd kernel and fails with
-    "invalid value for --gpu-architecture". sqrt(re^2+im^2) stays on ordinary
-    CUDA kernels and is differentiable.
+    On some CUDA setups (observed on sm_121 / GB10) complex abs() dispatches to
+    an nvrtc-JIT'd kernel and fails with "invalid value for --gpu-architecture".
+    sqrt(re^2+im^2) stays on ordinary CUDA kernels, is differentiable, and costs
+    nothing elsewhere, so it is used unconditionally.
     """
     return torch.sqrt(Z.real.pow(2) + Z.imag.pow(2) + 1e-12)
 

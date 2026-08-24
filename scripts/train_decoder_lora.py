@@ -38,9 +38,11 @@ Eval is the round-trip ladder itself, run against a held-out clip every
 adapter switched off. The numbers to watch are transient excess and tonality p95
 coming down without band energies or reconstruction regressing.
 
-Usage (in the sa3 container, from /workspace/sa3):
-  /opt/sa3-venv/bin/python scripts/train_decoder_lora.py \
-      --data_dir /data --eval_audio /data/holdout.wav --out_dir /out/declora
+Usage:
+  uv run python scripts/train_decoder_lora.py \
+      --model same-l --data_dir /path/to/audio \
+      --eval_audio /path/to/holdout.wav --out_dir out/declora \
+      --lambda_patch 30
 """
 
 import argparse

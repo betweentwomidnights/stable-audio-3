@@ -72,6 +72,17 @@ class StableAudioModel:
     def set_lora_strength(self, strength: float, lora_index: int | None = None):
         _set_lora_strength(self.model.model, strength, lora_index=lora_index)
         _set_lora_strength(self.model.conditioner, strength, lora_index=lora_index)
+        # Autoencoder-targeted adapters (config `target: "decoder"` or
+        # `"encoder"`) live on the pretransform, not the DiT, so they need
+        # reaching separately or they would load but be stuck at whatever
+        # strength they were built with -- which reads as "the adapter does
+        # nothing", since the built-in default is already 1.0 and a request to
+        # turn it off silently does not arrive.
+        ae = getattr(getattr(self.model, "pretransform", None), "model", None)
+        for half in ("encoder", "decoder"):
+            module = getattr(ae, half, None)
+            if module is not None:
+                _set_lora_strength(module, strength, lora_index=lora_index)
 
     @torch.inference_mode()
     def generate(

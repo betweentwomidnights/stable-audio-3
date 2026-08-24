@@ -198,7 +198,7 @@ def resolve_adapter_type(adapter_type, state_dict=None):
 # ------------------- helper functions for safetensors LoRA checkpoints -------------------
 
 
-def save_lora_safetensors(state_dict, lora_config, path):
+def save_lora_safetensors(state_dict, lora_config, path, dtype=torch.float16):
     """Save a LoRA checkpoint in safetensors format with config as metadata.
 
     The lora_config dict is JSON-serialized and stored under the metadata key
@@ -208,10 +208,22 @@ def save_lora_safetensors(state_dict, lora_config, path):
         state_dict: Dict of LoRA tensors (from get_lora_state_dict).
         lora_config: Dict with keys like rank, alpha, adapter_type, include, exclude.
         path: Output file path (should end in .safetensors).
+        dtype: Storage dtype for floating-point tensors, fp16 by default for
+            backward compatibility with every checkpoint already published.
+            Consider float32 for adapters on the ENCODER, where fp16's ~5e-4
+            relative precision can be amplified hard by the 12-layer stack: a
+            RANDOM rank-8 encoder adapter rounded to fp16 -- in memory, no save
+            or load involved -- moved the latent by 25-45% of its own effect.
+            That is a worst case, not a typical one; the shipped TRAINED decoder
+            adapter (squeakfix_v1, rank 16) re-rounds at 0.8%. Whether a trained
+            encoder adapter behaves like the random case or the trained decoder
+            one is unknown until there is one, and fp32 costs a doubled file
+            size to make the question moot.
     """
     metadata = {"lora_config": json.dumps(lora_config)}
-    fp16_dict = {k: v.half() if v.is_floating_point() else v for k, v in state_dict.items()}
-    _st_save_file(fp16_dict, str(path), metadata=metadata)
+    cast = {k: (v.to(dtype) if v.is_floating_point() else v)
+            for k, v in state_dict.items()}
+    _st_save_file(cast, str(path), metadata=metadata)
 
 
 def load_lora_checkpoint(path):

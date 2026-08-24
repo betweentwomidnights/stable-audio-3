@@ -340,6 +340,21 @@ def _matches_any(name, patterns):
 
 # --- core LoRA application ---
 
+def _is_parametrizable(module, attr_name):
+    """Can register_parametrization() accept `attr_name` on this module?
+
+    It requires the attribute to be a Parameter, a buffer, or an already
+    parametrized element. Deprecated-weight_norm layers expose `weight` as a
+    hook product and satisfy none of those.
+    """
+    if attr_name in getattr(module, "_parameters", {}):
+        return True
+    if attr_name in getattr(module, "_buffers", {}):
+        return True
+    existing = getattr(module, "parametrizations", None)
+    return existing is not None and attr_name in existing
+
+
 def _match_layer_type(layer, lora_config):
     """Find the matching lora_config key for a layer, using isinstance to handle ParametrizedLinear etc."""
     for layer_type in lora_config:
@@ -354,6 +369,8 @@ def apply_lora(layer, register=True, merge=False, lora_config=default_lora_confi
         matched_type = _match_layer_type(layer, lora_config)
         if matched_type is not None:
             for attr_name, parametrization in lora_config[matched_type].items():
+                if not _is_parametrizable(layer, attr_name):
+                    continue          # see _is_parametrizable (weight_norm'd layers)
                 parametrize.register_parametrization(layer, attr_name, parametrization(layer), unsafe=True)
     else:  # this will remove all parametrizations, use with caution
         if hasattr(layer, "parametrizations"):
@@ -392,6 +409,17 @@ def add_lora(model, lora_config=default_lora_config, include=None, exclude=None,
                 continue
 
             for attr_name, parametrization_fn in lora_config[matched_type].items():
+                if not _is_parametrizable(module, attr_name):
+                    # Layers wrapped by the deprecated torch.nn.utils.weight_norm
+                    # keep `weight` as a pre-forward-hook product of weight_g /
+                    # weight_v, so it is neither a Parameter, a buffer, nor a
+                    # parametrized element and register_parametrization raises.
+                    # Skipping is right: such a layer simply gets no adapter.
+                    # Without this, any LoRA aimed at a module tree containing a
+                    # weight-normed conv fails to load outright.
+                    vprint(f"  skipping {name}.{attr_name} (not parametrizable, "
+                           f"likely weight_norm'd {type(module).__name__})")
+                    continue
                 layer_bases = None
                 if svd_bases is not None:
                     bases_key = f"{name}.{attr_name}"

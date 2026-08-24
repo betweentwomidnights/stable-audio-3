@@ -16,6 +16,58 @@ from .utils import (
 from ...verbose import vprint
 
 
+def _resolve_lora_targets(model, model_type, target):
+    """Resolve which submodules a LoRA attaches to, from its declared `target`.
+
+    A checkpoint's config may carry `target`:
+      "dit"     (default) the diffusion transformer + conditioner, i.e. the
+                behaviour every existing checkpoint gets, since absent means
+                "dit".
+      "decoder" the autoencoder's decoder. Lets an adapter correct how latents
+                are rendered to audio rather than how latents are produced,
+                which is a different failure surface: the decoder resynthesizes
+                transients it cannot represent at 4096x downsampling, and that
+                error is downstream of both the DiT and any DiT LoRA.
+      "encoder" the autoencoder's encoder, the other half of the same pair. It
+                affects only paths that encode existing audio -- init_audio,
+                continuation, transform -- and is inert during plain generation,
+                where the DiT produces latents directly. Justified by latent
+                inversion (scripts/latent_inversion_probe.py): for generated
+                audio a latent that reconstructs at 43.2 dB SI-SDR provably
+                exists, and the stock encoder lands 21.3% away from it, at
+                14.7 dB.
+
+    Returns (modules, bases_prefixes) so -XS adapters can look up SVD bases with
+    the right key prefix per module.
+    """
+    if target in ("decoder", "encoder"):
+        # Full model: model.pretransform.model.<half>. Standalone autoencoder
+        # (training / eval harness): model.<half>. Support both so one
+        # checkpoint loads in either context.
+        pre = getattr(model, "pretransform", None)
+        inner = getattr(pre, "model", None) if pre is not None else None
+        half = getattr(inner, target, None) if inner is not None else None
+        if half is None:
+            half = getattr(model, target, None)
+        if half is None:
+            raise ValueError(
+                f"LoRA target {target!r} needs either an autoencoder pretransform "
+                f"(model.pretransform.model.{target}) or a standalone autoencoder "
+                f"(model.{target}); neither was found."
+            )
+        return [half], [f"{target}."]
+
+    if target != "dit":
+        raise ValueError(
+            f"unknown LoRA target {target!r}; expected 'dit', 'decoder' or "
+            f"'encoder'"
+        )
+
+    if model_type in ("diffusion_cond", "diffusion_cond_inpaint"):
+        return [model.model, model.conditioner], ["model.", "conditioner."]
+    return [model], ["model."]
+
+
 def load_and_apply_loras(model, lora_ckpt_paths, model_type, svd_bases_path=None):
     """Load LoRA checkpoints from disk and attach them to `model`.
 
@@ -44,8 +96,6 @@ def load_and_apply_loras(model, lora_ckpt_paths, model_type, svd_bases_path=None
         model.lora_names = []
         return []
 
-    is_cond = model_type in ("diffusion_cond", "diffusion_cond_inpaint")
-
     # Pass 1: load each checkpoint and resolve adapter type.
     lora_entries = []  # (path, state_dict, config_dict, adapter_type)
     for i, lora_path in enumerate(lora_ckpt_paths):
@@ -58,21 +108,33 @@ def load_and_apply_loras(model, lora_ckpt_paths, model_type, svd_bases_path=None
         lora_entries.append((lora_path, state_dict, config_dict, adapter_type))
 
     # Load SVD bases only if at least one LoRA is -XS.
-    model_svd_bases = None
-    cond_svd_bases = None
+    svd_bases_all = None
     any_xs = any(t.endswith("-xs") for _, _, _, t in lora_entries)
     if any_xs:
         if svd_bases_path is not None:
             vprint(f"Loading SVD bases from {svd_bases_path}")
             svd_bases_all = torch.load(svd_bases_path, map_location="cpu", weights_only=True)
-            model_svd_bases = {k[len("model."):]: v for k, v in svd_bases_all.items() if k.startswith("model.")}
-            cond_svd_bases = {k[len("conditioner."):]: v for k, v in svd_bases_all.items() if k.startswith("conditioner.")}
-            vprint(f"  model bases: {len(model_svd_bases)}, conditioner bases: {len(cond_svd_bases)}")
+            vprint(f"  {len(svd_bases_all)} bases loaded")
         else:
             print("WARNING: -XS adapter type present without svd_bases_path -- SVD will be computed on current device")
 
+    def _bases_for(prefix):
+        """Strip a target's prefix off the shared SVD-bases dict."""
+        if svd_bases_all is None:
+            return None
+        return {k[len(prefix):]: v for k, v in svd_bases_all.items()
+                if k.startswith(prefix)}
+
     # Pass 2: apply each LoRA.
     lora_names = []
+    # How many adapters are already stacked on each target module. This is NOT
+    # the same as the enumerate index once targets differ: checkpoint keys encode
+    # the PARAMETRIZATION LIST POSITION (".parametrizations.weight.<pos>."), and
+    # a decoder-targeted adapter loaded after two DiT ones sits at decoder
+    # position 0 while its global index is 2. Remapping to the global index makes
+    # every key miss, and load_state_dict(strict=False) swallows it -- the
+    # adapter attaches, reports the right tensor count, and does nothing.
+    attach_pos = {}
     for i, (lora_path, state_dict, config_dict, adapter_type) in enumerate(lora_entries):
         rank = config_dict.get("rank", infer_global_rank(state_dict))
         alpha = config_dict.get("alpha", rank)
@@ -88,22 +150,38 @@ def load_and_apply_loras(model, lora_ckpt_paths, model_type, svd_bases_path=None
                 "weight": partial(LoRAParametrization.from_conv1d, rank=rank, lora_alpha=alpha, adapter_type=adapter_type, lora_index=i),
             },
         }
-        if is_cond:
-            add_lora(model.model, lora_config, include=include, exclude=exclude,
-                     svd_bases=model_svd_bases if is_xs else None)
-            add_lora(model.conditioner, lora_config, include=include, exclude=exclude,
-                     svd_bases=cond_svd_bases if is_xs else None)
-        else:
-            add_lora(model, lora_config, include=include, exclude=exclude,
-                     svd_bases=model_svd_bases if is_xs else None)
+        # Absent `target` means "dit", so every pre-existing checkpoint keeps
+        # its current behaviour.
+        target = config_dict.get("target", "dit")
+        targets, bases_prefixes = _resolve_lora_targets(model, model_type, target)
+        if target != "dit":
+            vprint(f"  target: {target}")
+
+        # Position this adapter will occupy in its targets' parametrization
+        # lists. Targets of one entry stay in lockstep, so any of them will do.
+        pos = attach_pos.get(id(targets[0]), 0)
+
+        for mod, prefix in zip(targets, bases_prefixes):
+            add_lora(mod, lora_config, include=include, exclude=exclude,
+                     svd_bases=_bases_for(prefix) if is_xs else None)
+        for mod in targets:
+            attach_pos[id(mod)] = attach_pos.get(id(mod), 0) + 1
 
         prepare_dora_state_dict(state_dict)
-        remapped_sd = remap_lora_state_dict(state_dict, i)
-        if is_cond:
-            model.model.load_state_dict(remapped_sd, strict=False)
-            model.conditioner.load_state_dict(remapped_sd, strict=False)
-        else:
-            model.load_state_dict(remapped_sd, strict=False)
+        remapped_sd = remap_lora_state_dict(state_dict, pos)
+        loaded_any = False
+        for mod in targets:
+            result = mod.load_state_dict(remapped_sd, strict=False)
+            unexpected = set(getattr(result, "unexpected_keys", []) or [])
+            if any(k not in unexpected for k in remapped_sd):
+                loaded_any = True
+        if not loaded_any and remapped_sd:
+            # Loud, because strict=False would otherwise let a completely
+            # unapplied adapter look like a successful load.
+            print(f"WARNING: LoRA {lora_path} matched NO parameters on its "
+                  f"target(s) at parametrization position {pos} -- the adapter "
+                  f"is attached but will have no effect. Checkpoint key layout "
+                  f"probably does not match the target module.")
         lora_names.append(os.path.splitext(os.path.basename(lora_path))[0])
 
     vprint("lora layers:", len(get_lora_layers(model)))

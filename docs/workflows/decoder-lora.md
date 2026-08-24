@@ -7,9 +7,11 @@ The encoder stays frozen throughout, so the latent space, the DiT and every
 existing DiT LoRA remain bit-compatible. A decoder adapter stacks with them
 freely.
 
-A trained checkpoint for SAME-L is published at
-[`thepatch/same-l-decoder-lora`](https://huggingface.co/thepatch/same-l-decoder-lora)
-if you want to hear the result before training one.
+One adapter trained this way is published at
+[`thepatch/same-l-decoder-lora`](https://huggingface.co/thepatch/same-l-decoder-lora),
+if hearing one is useful before training your own. Numbers quoted throughout this
+document come from that checkpoint and its ablations; they are illustrations of
+what the measurements look like, not targets to hit.
 
 ---
 
@@ -115,7 +117,7 @@ decoder; ~2.9 s/step at 10 s crops, under 10 GB. The decoder is 426M params and
 **99.8 % of them are `nn.Linear`**, so the stock `add_lora` covers it without new
 injection machinery.
 
-### The recipe behind the published checkpoint
+### A worked starting recipe
 
 ```bash
 uv run python scripts/train_decoder_lora.py \
@@ -128,8 +130,9 @@ uv run python scripts/train_decoder_lora.py \
     --out_dir out/declora
 ```
 
-The published checkpoint is **step 2000** of that run, not the last one. See
-"Picking a checkpoint" below.
+That run was configured for 8000 steps and the checkpoint that shipped was
+**step 2000**, not the last one — see "Picking a checkpoint" below, because the
+reason is not obvious.
 
 ### Training buckets
 
@@ -286,8 +289,10 @@ percussion-dense material, not on the ladder alone.**
 
 ### The metric gap at low re-encode depth
 
-The benefit scales with depth. Tonal frames (>12 dB tonality, 6–16 kHz) on
-2-minute generations, mean of 4, the adapter the only variable:
+What a decoder adapter buys scales with re-encode depth, and that shapes how you
+should evaluate one. Example measurements from the published checkpoint — tonal
+frames (>12 dB tonality, 6–16 kHz) on 2-minute generations, mean of 4, the
+adapter the only variable:
 
 | depth | stock | adapted | |
 |---|---|---|---|

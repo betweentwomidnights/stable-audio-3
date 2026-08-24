@@ -2,6 +2,13 @@
 
 LoRA fine-tuning lets you adapt a Stable Audio 3 model to a specific style, sound, or domain without retraining the whole model. The result is a small `.safetensors` file (~50–200 MB) that you load on top of any base checkpoint at inference time — stackable, adjustable in strength, and swappable without touching the base weights.
 
+By default a LoRA adapts the **diffusion transformer** — how latents are produced.
+A checkpoint can instead declare `target: "decoder"` or `target: "encoder"` in its
+config and adapt the **autoencoder**, changing how latents are rendered to audio
+(or how audio is encoded to latents) instead. See
+[Decoder LoRA](decoder-lora.md). Checkpoints with no `target` are DiT LoRAs, so
+everything trained before that field existed keeps working unchanged.
+
 ## What You Need
 
 - A dataset of audio files with matching text descriptions (at minimum ~20–50 clips; more is better)
@@ -171,6 +178,10 @@ The loading process (`load_and_apply_loras`):
 When multiple LoRAs are loaded, they are stacked using PyTorch's native `nn.utils.parametrize` API. Each call to `register_parametrization` appends to the `ParametrizationList` on each weight, and the forward chains them additively. Each LoRA is assigned a unique `lora_index` (0, 1, 2, ...) that enables independent control.
 
 Multiple LoRAs can use different adapter types (e.g., one standard LoRA and one DoRA), different ranks, and different layer filters. They are all applied simultaneously during inference.
+
+They can also target different modules. A decoder-targeted checkpoint stacks with
+DiT LoRAs in any order — parametrization slots are tracked per target module, so a
+decoder adapter loaded third still occupies decoder slot 0.
 
 ## Gradio UI Controls
 

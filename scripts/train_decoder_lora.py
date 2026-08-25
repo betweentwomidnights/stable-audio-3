@@ -210,6 +210,10 @@ def eval_ladder(ae, x, sr, ea, iters, onsets=None):
         "transient_excess_db": excess,
         "band_8_12k": stats["band_db"]["brill_8k_12k"],
         "band_12_16k": stats["band_db"]["air_12k_16k"],
+        # Fidelity to the source through the whole ladder. The other metrics all
+        # describe the ARTIFACT, so without this a run that quietly degraded
+        # reconstruction to buy a tonality win looks like an improvement.
+        "si_sdr_db": stats["si_sdr_db"],
         "step_drift_pct": 100 * (sum(drifts) / len(drifts)) if drifts else float("nan"),
         "_final_audio": last,
         "_onsets": onsets,
@@ -228,6 +232,7 @@ def fmt_eval(tag, e, base=None):
         f"   steady {e['steady_artifact_db']:6.2f}{d('steady_artifact_db')}"
         f"   excess {e['transient_excess_db']:5.2f}{d('transient_excess_db')}"
         f"   8-12k {e['band_8_12k']:6.1f}{d('band_8_12k')}"
+        f"   si-sdr {e['si_sdr_db']:6.2f}{d('si_sdr_db')}"
         f"   drift% {e['step_drift_pct']:5.2f}{d('step_drift_pct')}"
     )
 
@@ -332,16 +337,28 @@ def main():
     p.add_argument("--lambda_rec", type=float, default=1.0)
     p.add_argument("--lambda_cycle", type=float, default=10.0)
     p.add_argument("--lambda_tonal", type=float, default=0.3)
-    # v2: match HF band energy to the target. The pair the ear picked out as
-    # clearly better moved almost nothing on tonality but gained +2.2 dB at
-    # 16-22 kHz, so restored air may be what is actually audible. Only applies
-    # to buckets with paired audio.
-    p.add_argument("--lambda_hfband", type=float, default=1.0)
-    # Default 0 = inert, so this changes nothing until asked for. v1 shipped
-    # without it and put a 172 Hz comb on the patch grid that no other term
+    # Match HF band energy to the target. Motivated by listening: the pair the
+    # ear picked out as clearly better moved almost nothing on tonality but
+    # gained +2.2 dB at 16-22 kHz, so restored air may be what is actually
+    # audible. Only applies to buckets with paired audio.
+    #
+    # DEFAULT 0: this term did not survive its own trial. At weight 1.0 it is
+    # not a garnish -- measured 1.35-5.37 against a reconstruction term of
+    # 1.12-2.70 -- so it competes with reconstruction for a rank-16 adapter's
+    # capacity and reconstruction loses. Raise it deliberately if you want to
+    # test the "restored air" hypothesis, not by leaving it on.
+    p.add_argument(
+        "--lambda_hfband",
+        type=float,
+        default=0.0,
+        help="weight on the HF band-energy match (0 = off; it competes with "
+        "reconstruction for adapter capacity at 1.0)",
+    )
+    # Default 0 = inert, so this changes nothing until asked for. An adapter
+    # trained without it put a 172 Hz comb on the patch grid that no other term
     # could see; 30 puts the penalty near 0.03 on clean audio (negligible
-    # against rec ~= 1.0) and ~0.56 at v1's artifact level. Start LOW: v2's
-    # band-match term failed by competing with reconstruction for rank-16
+    # against rec ~= 1.0) and ~0.56 at that artifact level. Start LOW: the
+    # band-match term above failed by competing with reconstruction for rank-16
     # capacity, and this one applies to every bucket including dit.
     p.add_argument(
         "--lambda_patch",
@@ -366,7 +383,7 @@ def main():
     )
     # Kept as explicit flags rather than derived from --tonality_bands: the eval
     # ladder's tonal_p95 is the number compared ACROSS runs, and silently moving
-    # its band would make new runs incomparable to v1/v3's recorded baselines.
+    # its band would make new runs incomparable to earlier recorded baselines.
     # Move it deliberately when you move the penalty.
     p.add_argument("--eval_tonality_lo", type=float, default=6000.0)
     p.add_argument("--eval_tonality_hi", type=float, default=16000.0)
@@ -722,8 +739,14 @@ def main():
             el = time.time() - t0
             print(
                 f"[train] {step:>6}/{cli.steps}  loss {m['loss']:.4f}  "
-                f"rec {m['rec']:.4f}  cyc {m['cyc']:.4f}  ton {m['ton']:.3f}  "
-                f"hf {m['hf']:.3f}  patch {m['patch']:.2e}  "
+                f"rec {m['rec']:.4f}  cyc {m['cyc']:.4f}  "
+                # An unweighted term is still logged -- its magnitude is what
+                # you would use to decide whether to switch it on -- but marked,
+                # because a number in the loss line that is not in the loss is
+                # exactly the kind of thing that gets chased for an hour.
+                f"ton {m['ton']:.3f}{'' if cli.lambda_tonal else '(off)'}  "
+                f"hf {m['hf']:.3f}{'' if cli.lambda_hfband else '(off)'}  "
+                f"patch {m['patch']:.2e}{'' if cli.lambda_patch else '(off)'}  "
                 f"|g| {m['gnorm']:.4f}  lr {lr_at(step):.2e}  "
                 f"[{counts['real']}r/{counts['drift']}d/{counts['dit']}g]  "
                 f"{el / step:.2f}s/step"

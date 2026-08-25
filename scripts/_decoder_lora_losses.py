@@ -1,6 +1,8 @@
 """Losses for the SAME decoder LoRA.
 
-Three terms, aimed at the two things the probes actually measured:
+Five terms. The first three are the core of the objective and aimed at the two
+things the probes actually measured; the last two exist because of artifacts the
+first three provably cannot see.
 
   reconstruction   multi-resolution log-STFT L1, K-weighted. Keeps the decoder
                    honest and stops the other terms finding degenerate wins.
@@ -16,7 +18,8 @@ Three terms, aimed at the two things the probes actually measured:
                    (10.5% for real audio, 15-18.5% for generated) and so its
                    scale does not depend on latent magnitude.
 
-  HF tonality      one-sided penalty on spectral peakiness in 6-16 kHz. The
+  HF tonality      one-sided penalty on spectral peakiness, over the sub-bands
+                   given by --tonality_bands (default 6-18 kHz for SAME-L). The
                    differentiable version of dragging an erosion effect across
                    the snare: real hats and cymbals are noise-like (flat, low
                    tonality), the artifact is narrowband (peaky, high tonality).
@@ -25,10 +28,26 @@ Three terms, aimed at the two things the probes actually measured:
                    harmonics, sibilance), so we only ever push toward noise,
                    never away from it.
 
-Note on K-weighting: ScragVAE *removed* its VAE's perceptual HF de-emphasis to
-force more high end out of the decoder, because that VAE was dull above 6 kHz.
-Ours over-generates HF under iteration, so removing it would push the wrong way.
-Kept deliberately.
+  patch grid       penalty on structure locked to the un-patch grid. NOT
+                   optional if you intend to ship the result: the pretransform's
+                   un-patch makes output channel index and time-position-within-
+                   patch the same axis, so any channel-wise bias the adapter
+                   learns is stamped into every patch as a comb at sr/patch.
+                   None of the three terms above can see it -- multi-res STFT
+                   spreads a comb over 60+ harmonics, the cycle loss lives in
+                   latent space, and the tonality terms only measure flatness
+                   inside their band. Off by default; see --lambda_patch.
+
+  HF band match    two-sided match of HF band ENERGY to the target. Off by
+                   default -- it competes with reconstruction for a rank-16
+                   adapter's capacity and reconstruction loses. Kept because the
+                   hypothesis it tests (that restored top octave, not reduced
+                   peakiness, is what the ear rewards) has not been settled.
+
+Note on K-weighting: decoder fine-tunes that target the OPPOSITE defect -- a VAE
+dull above 6 kHz -- remove the perceptual HF de-emphasis to force more high end
+out of the decoder. This one over-generates HF under iteration, so removing it
+would push the wrong way. Kept deliberately.
 """
 
 import torch
@@ -103,39 +122,9 @@ def cycle_loss(z_rt, z):
     driven to zero and should not be expected to. (That nondeterminism is not
     hardware noise: the SAME encoder adds `mask_noise` = 1e-3 gaussian to its
     learned query tokens on every forward, ungated by train/eval. Draw the same
-    noise for both passes and the floor disappears -- see anchor_loss.)
+    noise for both passes and the floor disappears.)
     """
     return relative_latent_error(z_rt, z)
-
-
-def anchor_loss(z_new, z_ref, budget=0.0):
-    """Keep a re-trained encoder inside the latent space the DiT was trained on.
-
-    Load-bearing, not polish. Latent inversion showed the optimal latent sits
-    21-30% away from E(x) (mean 25.8%), so a pure audio loss against a frozen
-    decoder will happily walk the encoder that far. Generation would survive
-    that -- the DiT feeds the decoder directly and the encoder is uninvolved --
-    but init_audio, continuation and transform all encode real audio and hand
-    the result to the DiT, which is exactly the distribution shift that would
-    break the paths this work is for.
-
-    `budget` makes it a hinge rather than a spring: below `budget` relative
-    error there is no gradient at all, so reconstruction is free to use the
-    whole allowance, and above it the term pushes back. That lets the budget be
-    stated as a number one can defend ("stay within 5% of the stock encoder")
-    instead of being an emergent property of a weight. budget=0 recovers a plain
-    relative-L2 pull toward z_ref, which is what the DiT-latent bucket wants:
-    there z_ref is a latent the DiT itself produced, so moving all the way onto
-    it is the goal, not a risk.
-
-    Callers should compute z_ref under the SAME RNG state as z_new. Otherwise
-    mask_noise alone puts ~1.5% of junk in this term, which is a third of a
-    typical budget.
-    """
-    err = relative_latent_error(z_new, z_ref)
-    if budget > 0:
-        return (err - budget).clamp(min=0.0)
-    return err
 
 
 def patch_grid_penalty(y, patch=256, eps=1e-8):
@@ -193,7 +182,11 @@ def patch_grid_penalty(y, patch=256, eps=1e-8):
 
 
 def hf_tonality(sig, sr, lo=6000.0, hi=16000.0, n_fft=2048):
-    """Per-item HF tonality in dB (higher = peakier = whistlier)."""
+    """Mean HF tonality in dB, reduced over items and frames.
+
+    Higher = peakier = whistlier. Scalar, not per-item: the mean is taken here
+    so the callers can treat it as a loss term directly.
+    """
     hop = n_fft // 4
     S = cmag(_stft(sig, n_fft, hop))
     b0, b1 = _bins(lo, hi, n_fft, sr)
@@ -244,9 +237,10 @@ def hf_tonality_penalty_multiband(
 ):
     """Per-sub-band one-sided tonality penalty.
 
-    v1 used one broadband 6-16 kHz penalty, which the decoder satisfied by step
-    ~150 and which then contributed no gradient for the remaining 2850 steps --
-    the erosion effect shaped only the first 2% of training. Requiring the
+    An earlier version used one broadband 6-16 kHz penalty, which the decoder
+    satisfied within ~150 steps and which then contributed no gradient for the
+    rest of the run -- the erosion effect shaped only the opening couple of
+    percent of training. Requiring the
     constraint to hold in EACH sub-band is strictly harder to satisfy, so it
     stays engaged, without pushing tonality below the target (which would erode
     real cymbal and string detail rather than squeaks).
@@ -262,23 +256,3 @@ def hf_tonality_penalty_multiband(
             ref = torch.zeros((), device=y.device)
         total = total + (t_y - ref).clamp(min=0.0)
     return total / max(len(bands), 1)
-
-
-def hf_tonality_penalty(
-    y, sr, target_audio=None, target_db=None, lo=6000.0, hi=16000.0, n_fft=2048
-):
-    """One-sided: penalise only tonality ABOVE the target.
-
-    `target_audio` for buckets with paired ground truth; `target_db` (a scalar
-    measured from the real-audio set) for DiT-sampled latents, which have no
-    paired audio. Passing neither penalises absolute tonality, which is usually
-    not what you want -- it would fight legitimate tonal content.
-    """
-    t_y = hf_tonality(y, sr, lo, hi, n_fft)
-    if target_audio is not None:
-        ref = hf_tonality(target_audio, sr, lo, hi, n_fft).detach()
-    elif target_db is not None:
-        ref = torch.as_tensor(float(target_db), device=y.device)
-    else:
-        ref = torch.zeros((), device=y.device)
-    return (t_y - ref).clamp(min=0.0)

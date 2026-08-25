@@ -3,6 +3,11 @@
 A LoRA on the autoencoder's **decoder** rather than on the DiT. It changes how
 latents are rendered to audio, not how latents are produced.
 
+> **Scope.** Everything measured in this document is **SAME-L**. The mechanism
+> and the trainer are not specific to it, but no number here has been reproduced
+> on SAME-S, and there is reason to expect it to behave differently — see
+> [SAME-S](#same-s) below.
+
 The encoder stays frozen throughout, so the latent space, the DiT and every
 existing DiT LoRA remain bit-compatible. A decoder adapter stacks with them
 freely.
@@ -162,6 +167,7 @@ LoRAs measured drift deltas under half a percent. Generate its latents with
 | `--lambda_cycle` | `‖E(D(z)) − z‖ / ‖z‖`, encoder frozen | **the load-bearing term** — trains the decoder to emit audio the frozen encoder maps back to the same latent |
 | `--lambda_tonal` | one-sided HF tonality penalty | pushes invented narrowband HF toward noise |
 | `--lambda_patch` | patch-grid structure penalty | see below — not optional if you intend to ship the result |
+| `--lambda_hfband` | two-sided HF band-energy match | **off by default.** Tests whether restored top octave, rather than reduced peakiness, is what the ear rewards. At 1.0 it measures 1.35–5.37 against a reconstruction term of 1.12–2.70, so it competes with reconstruction for a rank-16 adapter's capacity and reconstruction loses. Raise it deliberately or not at all. |
 
 Two deliberate choices worth knowing about:
 
@@ -214,8 +220,10 @@ satisfied by the adapter simply going quieter. Calibration on 20 s crops:
 | adapter trained without the term, strength 1 | 1.9e-2 |
 | the same adapter at strength 2 | 1.1e-1 |
 
-~20× separation between stock and the artifact. Start at `30`; that is ~0.12 of a
-~3.9 total on clean audio and ~2.4 at the artifact level.
+~20× separation between stock and the artifact. Start at `30`: against the table
+above that is ~0.03–0.04 on clean audio — negligible beside a reconstruction term
+of ~1.0 — and ~0.57 at the artifact level, where it becomes the thing the
+optimiser has to answer for.
 
 Two things to know when reading the number:
 
@@ -261,10 +269,28 @@ under stem separation — which is how it was found in the first place.
 Where the tonality penalty looks. The default three sub-bands all sit at 6 kHz and
 above, which is right for SAME-L, whose invented tonality is genuinely high.
 
-It is **wrong for SAME-S**, whose artifact lives at 1–8 kHz. Measured stock vs
-adapted, the p95 tonality gap is +4.26 dB at 4–8 kHz and +0.77 dB at 8–16 kHz — a
-6 kHz floor can barely see it. For SAME-S try
-`--tonality_bands 1000-2000,2000-4000,4000-8000`.
+<a name="same-s"></a>
+### On SAME-S
+
+Everything above was developed and measured on SAME-L. SAME-S is a different
+proposition and this document does not claim to cover it.
+
+Two known differences, both pointing the same way:
+
+- **The artifact sits lower.** On SAME-S it lives around 1–8 kHz rather than
+  above 6 kHz, so the default bands can barely see it. In exploratory runs the
+  p95 tonality gap between a stock and an adapted decode was +4.26 dB at 4–8 kHz
+  against +0.77 dB at 8–16 kHz. `--tonality_bands 1000-2000,2000-4000,4000-8000`
+  is a reasonable place to start, but moving the band is **not** by itself the
+  adaptation required.
+- **There is far less adapter to work with.** At rank 16 the SAME-L decoder
+  exposes 49 `nn.Linear` layers / 5.63M trainable params; SAME-S exposes 25 /
+  1.42M — under a quarter. Terms that merely compete for capacity on SAME-L can
+  crowd reconstruction out entirely there, so the weights above should be treated
+  as SAME-L values, not defaults.
+
+The patch grid is the same (`patch_size 256`), so `--lambda_patch` transfers
+unchanged. Expect the rest to need its own tuning pass and its own listening.
 
 ---
 

@@ -229,7 +229,7 @@ def analyse(x_test, x_ref, sr, args):
     # crest factor of the HF band — transient sharpness of hats/snares
     hf = highpass_via_stft(mt, sr, n_fft, hop, args.hf_lo)
     rms = float(hf.pow(2).mean().sqrt())
-    out["hf_crest_db"] = db((float(hf.abs().max()) ** 2) / (rms**2 + EPS)) / 1.0
+    out["hf_crest_db"] = db((float(hf.abs().max()) ** 2) / (rms**2 + EPS))
 
     # fidelity vs reference
     out["si_sdr_db"] = si_sdr(mt, mr)

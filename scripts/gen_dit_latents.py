@@ -2,10 +2,10 @@
 Sample base-DiT latents to .npy for the decoder-LoRA `dit` bucket.
 
 Why this bucket exists: every DiT-sampled latent drifts 15-18.5% on the
-self-consistency metric against 10.5% for real encoder output
-(scripts/lora_latent_signature.py). That gap is in the BASE model, so the
-decoder needs to see generated latents during training or it will only ever be
-corrected on the real-audio distribution it already handles best.
+round-trip self-consistency metric ||E(D(z))-z||/||z||, against 10.5% for the
+encoder's own output on real audio. That gap is in the BASE model, so the decoder
+needs to see generated latents during training or it will only ever be corrected
+on the real-audio distribution it already handles best.
 
 It is deliberately BASE-only. kev/koan measured drift deltas under half a
 percent against base on identical prompts, so adapter-specific latents buy

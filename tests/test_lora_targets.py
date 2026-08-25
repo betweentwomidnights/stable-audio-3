@@ -357,3 +357,50 @@ def test_decoder_lora_scripts_import(script):
         cwd=root,
     )
     assert r.returncode == 0, f"{script} failed to import:\n{r.stderr}"
+
+
+def test_decoder_lora_docs_reference_real_files():
+    """Every repo path named by this work's files must actually exist.
+
+    Prose gets moved between branches more freely than code does, and a citation
+    of a script that lives only in someone's working tree is invisible to lint,
+    to the type checker and to every other test -- it is found by a reader who
+    goes looking for the file and cannot find it. Both of the ones this catches
+    shipped that way.
+
+    Scoped to the decoder-LoRA files on purpose. Elsewhere in the repo, some
+    paths are written relative to their own subproject rather than to the repo
+    root and resolve fine from there, so a repo-wide version of this check would
+    report dozens of things that are not broken.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    owned = [
+        "stable_audio_3/models/lora/loader.py",
+        "stable_audio_3/models/lora/model.py",
+        "stable_audio_3/models/lora/utils.py",
+        "scripts/train_decoder_lora.py",
+        "scripts/_decoder_lora_losses.py",
+        "scripts/_decoder_lora_eval.py",
+        "scripts/gen_dit_latents.py",
+        "docs/workflows/decoder-lora.md",
+        "tests/test_lora_targets.py",
+    ]
+    pattern = re.compile(
+        r"\b(?:scripts|tests|docs|stable_audio_3|pipelines)/[A-Za-z0-9_./-]+"
+        r"\.(?:py|md|json|sh|toml)\b"
+    )
+
+    missing = []
+    for rel in owned:
+        f = root / rel
+        assert f.exists(), f"{rel} is listed here but not in the repo"
+        for ref in sorted(set(pattern.findall(f.read_text()))):
+            if not (root / ref).exists():
+                missing.append(f"{rel} -> {ref}")
+
+    assert not missing, "references to files that do not exist:\n  " + "\n  ".join(
+        missing
+    )

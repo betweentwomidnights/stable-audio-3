@@ -31,11 +31,10 @@ def _resolve_lora_targets(model, model_type, target):
       "encoder" the autoencoder's encoder, the other half of the same pair. It
                 affects only paths that encode existing audio -- init_audio,
                 continuation, transform -- and is inert during plain generation,
-                where the DiT produces latents directly. Justified by latent
-                inversion (scripts/latent_inversion_probe.py): for generated
-                audio a latent that reconstructs at 43.2 dB SI-SDR provably
-                exists, and the stock encoder lands 21.3% away from it, at
-                14.7 dB.
+                where the DiT produces latents directly. There is headroom
+                there: optimising a latent directly against generated audio
+                reaches 43.2 dB SI-SDR, so such a latent provably exists, while
+                the stock encoder lands 21.3% away from it at 14.7 dB.
 
     Returns (modules, bases_prefixes) so -XS adapters can look up SVD bases with
     the right key prefix per module.

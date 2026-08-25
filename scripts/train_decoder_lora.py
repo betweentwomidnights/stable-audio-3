@@ -30,7 +30,8 @@ than one distribution:
          so only the cycle and tonality terms apply. Needed because generated
          latents drift 15-18.5% against real audio's 10.5% -- that gap is in the
          BASE model and is the first-generation artifact's basis. It is NOT
-         LoRA-specific: kev/koan measured drift deltas under half a percent, so
+         LoRA-specific: trained DiT LoRAs measured drift deltas under half a
+         percent against base on identical prompts, so
          no adapter-specific bucket is required.
 
 Eval is the round-trip ladder itself, run against a held-out clip every
@@ -57,6 +58,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torchaudio
 import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -233,6 +235,55 @@ def fmt_eval(tag, e, base=None):
 # --------------------------------------------------------------------------
 
 
+def resolve_eval_window(path, offset, seconds):
+    """Pick an eval window that actually exists inside `path`.
+
+    Reads the header only, so this can run before the model is loaded -- the
+    point being that a bad window should fail in a second rather than after a
+    multi-minute load.
+
+    Returns (offset, seconds, note). Raises ValueError if no window is possible.
+    """
+    info = torchaudio.info(str(path))
+    dur = info.num_frames / float(info.sample_rate)
+    if dur <= 0:
+        raise ValueError(f"{path} appears to be empty")
+
+    if offset + seconds <= dur:
+        return offset, seconds, None
+
+    # Prefer keeping the full window and moving it earlier: window length is what
+    # ladder numbers are compared across, head position is only cosmetic.
+    if seconds <= dur:
+        new_offset = max(0.0, dur - seconds)
+        return (
+            new_offset,
+            seconds,
+            (
+                f"--eval_offset {offset:.1f}s + --eval_seconds {seconds:.1f}s exceeds "
+                f"{Path(path).name} ({dur:.1f}s); using offset {new_offset:.1f}s so the "
+                f"full {seconds:.1f}s window still fits"
+            ),
+        )
+
+    # The clip is shorter than the requested window, so the window has to shrink
+    # and the run is no longer comparable to one measured over `seconds`.
+    if dur < 5.0:
+        raise ValueError(
+            f"--eval_audio {path} is only {dur:.2f}s; the round-trip ladder needs "
+            f"at least ~5s of material. Pass a longer clip."
+        )
+    return (
+        0.0,
+        dur,
+        (
+            f"{Path(path).name} is {dur:.1f}s, shorter than --eval_seconds "
+            f"{seconds:.1f}s; evaluating on the whole clip instead. Ladder numbers "
+            f"from this run are NOT comparable to runs using a {seconds:.1f}s window"
+        ),
+    )
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -334,6 +385,17 @@ def main():
     )
     p.add_argument("--eval_iters", type=int, default=4)
     p.add_argument("--eval_seconds", type=float, default=20.0)
+    # Skipping the first seconds avoids a fade-in or a count-in dominating the
+    # ladder. It was hardcoded at 20.0, which silently truncated the eval window
+    # on any clip shorter than eval_offset + eval_seconds, and produced ladder
+    # numbers that could not be compared with any other run.
+    p.add_argument(
+        "--eval_offset",
+        type=float,
+        default=20.0,
+        help="seconds to skip at the head of --eval_audio "
+        "(reduced automatically if the clip is too short)",
+    )
     p.add_argument("--save_every", type=int, default=1000)
     p.add_argument("--log_every", type=int, default=25)
     p.add_argument("--seed", type=int, default=0)
@@ -383,6 +445,31 @@ def main():
         onset_window=0.12,
     )
 
+    # ---- data listing + eval window --------------------------------------
+    # Before the model load, deliberately: a bad eval window is a one-second
+    # check, and finding out about it after a multi-minute load is miserable.
+    eval_audio = cli.eval_audio
+    files = list_audio(cli.data_dir, exclude=(eval_audio,) if eval_audio else ())
+    if not files:
+        print(f"[train] no audio under {cli.data_dir}")
+        return 1
+    if eval_audio is None:
+        eval_audio = files[0]
+        files = files[1:]
+
+    if cli.eval_every > 0:
+        try:
+            eval_offset, eval_seconds, note = resolve_eval_window(
+                eval_audio, cli.eval_offset, cli.eval_seconds
+            )
+        except (ValueError, RuntimeError) as e:
+            print(f"[train] cannot use --eval_audio: {e}")
+            return 1
+        if note:
+            print(f"[train] WARNING: {note}")
+    else:
+        eval_offset, eval_seconds = cli.eval_offset, cli.eval_seconds
+
     # ---- model ----------------------------------------------------------
     print(f"[train] loading {cli.model} on {device} (fp32) ...")
     ae_wrap = AutoencoderModel.from_pretrained(cli.model, device=device)
@@ -427,14 +514,6 @@ def main():
     ae.decoder.train()
 
     # ---- data -----------------------------------------------------------
-    eval_audio = cli.eval_audio
-    files = list_audio(cli.data_dir, exclude=(eval_audio,) if eval_audio else ())
-    if not files:
-        print(f"[train] no audio under {cli.data_dir}")
-        return 1
-    if eval_audio is None:
-        eval_audio = files[0]
-        files = files[1:]
     print(f"[train] {len(files)} training files; eval on {eval_audio}")
 
     dit_latents = []
@@ -480,7 +559,7 @@ def main():
     # compare to and the ladder is pure cost -- skip it with the rest of eval.
     x_eval = base_eval = eval_onsets = None
     if cli.eval_every > 0:
-        x_eval = load_audio(eval_audio, sr, seconds=cli.eval_seconds, offset=20.0)
+        x_eval = load_audio(eval_audio, sr, seconds=eval_seconds, offset=eval_offset)
         x_eval = x_eval.unsqueeze(0).to(device)
         set_lora_strength(ae.decoder, 0.0)
         ae.decoder.eval()
@@ -698,11 +777,13 @@ def main():
                     # which recipe produced it. An adapter loaded onto the wrong
                     # base model does not error; it just sounds wrong.
                     "base_model": cli.model,
+                    "name": Path(cli.out_dir).name,
                     "step": step,
                     "trained_with": {
                         "lambda_rec": cli.lambda_rec,
                         "lambda_cycle": cli.lambda_cycle,
                         "lambda_tonal": cli.lambda_tonal,
+                        "lambda_hfband": cli.lambda_hfband,
                         "lambda_patch": cli.lambda_patch,
                         "patch_size": cli.patch_size,
                         "tonality_bands": cli.tonality_bands,
@@ -711,9 +792,14 @@ def main():
                             "drift": cli.w_drift,
                             "dit": cli.w_dit,
                         },
+                        "drift_depth_max": cli.drift_depth_max,
                         "crop_seconds": cli.crop_seconds,
                         "lr": cli.lr,
+                        "warmup": cli.warmup,
+                        "batch": cli.batch,
+                        "grad_clip": cli.grad_clip,
                         "seed": cli.seed,
+                        "steps_configured": cli.steps,
                     },
                 },
                 ckpt,

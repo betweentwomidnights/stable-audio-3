@@ -19,6 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from stable_audio_3 import StableAudioModel
 from stable_audio_3.models.lora import (
     LoRAParametrization,
     add_lora,
@@ -34,7 +35,7 @@ _RANK = 4
 _ALPHA = 4.0
 
 
-def _lora_cfg(rank=_RANK, alpha=_ALPHA):
+def _lora_cfg(rank=_RANK, alpha=_ALPHA, lora_index=0):
     return {
         nn.Linear: {
             "weight": partial(
@@ -42,6 +43,7 @@ def _lora_cfg(rank=_RANK, alpha=_ALPHA):
                 rank=rank,
                 lora_alpha=alpha,
                 adapter_type="lora",
+                lora_index=lora_index,
             ),
         },
     }
@@ -404,3 +406,85 @@ def test_decoder_lora_docs_reference_real_files():
     assert not missing, "references to files that do not exist:\n  " + "\n  ".join(
         missing
     )
+
+
+# ---------------------------------------------------------------------------
+# strength control reaching the pretransform
+# ---------------------------------------------------------------------------
+
+
+def _strengths(module):
+    """Every lora_strength currently set on a module tree.
+
+    Uses the library's own parametrization walk rather than a second
+    implementation of it, so the test cannot pass by agreeing with itself.
+    """
+    from stable_audio_3.models.lora.model import _iter_lora_params
+
+    return [float(p.lora_strength) for p in _iter_lora_params(module)]
+
+
+class _FakeStableAudioModel:
+    """The attribute shape StableAudioModel.set_lora_strength walks.
+
+    Bound to the real method rather than reimplementing it, so this exercises the
+    shipped code and not a copy of it.
+    """
+
+    def __init__(self, with_pretransform=True):
+        self.model = _FullModel() if with_pretransform else _DiTOnly()
+
+    set_lora_strength = StableAudioModel.set_lora_strength
+
+
+class _DiTOnly(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = _Half()
+        self.conditioner = _Half()
+
+
+def test_set_lora_strength_reaches_the_decoder():
+    """The line that makes "strength 0 renders at the stock decode" true.
+
+    Without it an autoencoder adapter is stuck at whatever strength it was built
+    with. Since the built-in default is 1.0, the adapter looks fine and only
+    turning it DOWN silently fails -- so nothing louder than this would notice.
+    """
+    m = _FakeStableAudioModel()
+    dec = m.model.pretransform.model.decoder
+    add_lora(dec, _lora_cfg())
+    add_lora(m.model.model, _lora_cfg())
+
+    assert _strengths(dec), "fixture attached no adapter to the decoder"
+
+    m.set_lora_strength(0.0)
+    assert all(s == 0.0 for s in _strengths(dec)), "decoder never got the update"
+    assert all(s == 0.0 for s in _strengths(m.model.model)), "DiT never got it"
+
+    m.set_lora_strength(0.5)
+    assert all(s == 0.5 for s in _strengths(dec))
+
+
+def test_set_lora_strength_is_index_selective_on_the_decoder():
+    """Stacked adapters have to stay independently controllable on the AE too."""
+    m = _FakeStableAudioModel()
+    dec = m.model.pretransform.model.decoder
+    add_lora(dec, _lora_cfg(lora_index=0))
+    add_lora(dec, _lora_cfg(lora_index=1))
+
+    m.set_lora_strength(1.0)
+    m.set_lora_strength(0.0, lora_index=0)
+
+    seen = sorted(set(_strengths(dec)))
+    assert seen == [0.0, 1.0], f"expected one adapter off and one on, got {seen}"
+
+
+def test_set_lora_strength_without_a_pretransform():
+    """An uncond/DiT-only model must not trip over the autoencoder lookup."""
+    m = _FakeStableAudioModel(with_pretransform=False)
+    add_lora(m.model.model, _lora_cfg())
+
+    m.set_lora_strength(0.0)  # must not raise
+
+    assert all(s == 0.0 for s in _strengths(m.model.model))

@@ -108,11 +108,27 @@ class EvalArgs:
 # --------------------------------------------------------------------------
 
 
-def list_audio(data_dir, exclude=()):
+def list_audio(data_dir, exclude=(), max_depth=None):
+    """Audio under `data_dir`, optionally limited to `max_depth` levels.
+
+    The depth limit is not a convenience. Datasets often keep DERIVED audio in
+    subdirectories -- time-stretched or pitch-shifted variants, stem splits,
+    per-track working files -- and an unbounded walk pulls those in as if they
+    were independent material. The result is a corpus that silently
+    over-represents whatever happens to have been expanded, with nothing in the
+    logs to show for it beyond a larger file count.
+
+    max_depth=1 means files sitting directly in data_dir.
+    """
+    root = Path(data_dir)
     files = []
-    for p in sorted(Path(data_dir).rglob("*")):
-        if p.suffix.lower() in AUDIO_EXTS and str(p) not in exclude:
-            files.append(str(p))
+    for p in sorted(root.rglob("*")):
+        if p.suffix.lower() not in AUDIO_EXTS or str(p) in exclude:
+            continue
+        if max_depth is not None:
+            if len(p.relative_to(root).parts) > max_depth:
+                continue
+        files.append(str(p))
     return files
 
 
@@ -294,6 +310,15 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--data_dir", required=True, help="dir of real audio (recursive)")
+    p.add_argument(
+        "--max_depth",
+        type=int,
+        default=None,
+        help="limit the walk under --data_dir to N levels (1 = top-level "
+        "files only). Use it when the dataset keeps DERIVED audio -- "
+        "stretches, stem splits, working files -- in subdirectories, which "
+        "an unbounded walk would train on as though it were source material",
+    )
     p.add_argument("--out_dir", required=True)
     p.add_argument(
         "--eval_audio",
@@ -466,7 +491,11 @@ def main():
     # Before the model load, deliberately: a bad eval window is a one-second
     # check, and finding out about it after a multi-minute load is miserable.
     eval_audio = cli.eval_audio
-    files = list_audio(cli.data_dir, exclude=(eval_audio,) if eval_audio else ())
+    files = list_audio(
+        cli.data_dir,
+        exclude=(eval_audio,) if eval_audio else (),
+        max_depth=cli.max_depth,
+    )
     if not files:
         print(f"[train] no audio under {cli.data_dir}")
         return 1

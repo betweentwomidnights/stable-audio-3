@@ -283,22 +283,31 @@ above, which is right for SAME-L, whose invented tonality is genuinely high.
 Everything above was developed and measured on SAME-L. SAME-S is a different
 proposition and this document does not claim to cover it.
 
-Two known differences, both pointing the same way:
+Four things that are different, from exploratory runs on it:
 
-- **The artifact sits lower.** On SAME-S it lives around 1–8 kHz rather than
-  above 6 kHz, so the default bands can barely see it. In exploratory runs the
-  p95 tonality gap between a stock and an adapted decode was +4.26 dB at 4–8 kHz
-  against +0.77 dB at 8–16 kHz. `--tonality_bands 1000-2000,2000-4000,4000-8000`
-  is a reasonable place to start, but moving the band is **not** by itself the
-  adaptation required.
 - **There is far less adapter to work with.** At rank 16 the SAME-L decoder
   exposes 49 `nn.Linear` layers / 5.63M trainable params; SAME-S exposes 25 /
   1.42M — under a quarter. Terms that merely compete for capacity on SAME-L can
-  crowd reconstruction out entirely there, so the weights above should be treated
-  as SAME-L values, not defaults.
+  crowd reconstruction out entirely there, so every weight above should be
+  treated as a SAME-L value, not a default.
+- **The patch grid transfers; the weight for it does not.** `patch_size` is 256
+  on both, so `--lambda_patch` measures the same thing. But 30 — the SAME-L
+  value — was too weak on SAME-S and left the comb roughly where it started.
+  Around **90** is what brought it down.
+- **The tonality term did not earn its place.** Turning it off entirely
+  (`--lambda_tonal 0`) made no measurable difference against an otherwise
+  identical run, so on SAME-S the sensible starting point is off, not retuned.
+  The artifact there does sit lower — around 1–8 kHz, where a p95 tonality gap
+  of +4.26 dB at 4–8 kHz against +0.77 dB at 8–16 kHz means the default 6 kHz
+  floor can barely see it — so `--tonality_bands 1000-2000,2000-4000,4000-8000`
+  is where to look *if* you want to revisit it. Moving the band is not by itself
+  the adaptation required.
+- **Do not screen SAME-S results on spectral flatness.** The tonality detector
+  is inverted on that material: the clip that sounds squeakiest scores lowest.
+  Judge by ear, and use `--lambda_patch` and the comb measurement for the part
+  that is measurable.
 
-The patch grid is the same (`patch_size 256`), so `--lambda_patch` transfers
-unchanged. Expect the rest to need its own tuning pass and its own listening.
+Expect the rest to need its own tuning pass and its own listening.
 
 ---
 
@@ -446,6 +455,12 @@ Each of these produces plausible-looking numbers while being wrong.
   That gating lives in the DiT's forward pass, so for a `decoder` or `encoder`
   target only *strength* applies. The controls are inert rather than wrong -- they
   cannot affect the adapter at all -- but nothing currently hides them.
+- **`--data_dir` walks all the way down unless you stop it.** Datasets often
+  keep derived audio in subdirectories — time-stretched variants, stem splits,
+  per-track working files — and an unbounded walk trains on those as though they
+  were independent material, silently over-representing whatever happened to
+  have been expanded. `--max_depth 1` restricts it to files sitting directly in
+  the directory.
 - **Tonality is a detector, not an annoyance predictor.** It is what found the
   artifact, but a clip can score well and still sound wrong. Screen on ears and on
   percussion-dense material.

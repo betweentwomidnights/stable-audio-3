@@ -240,10 +240,10 @@ def hf_tonality_penalty_multiband(
     An earlier version used one broadband 6-16 kHz penalty, which the decoder
     satisfied within ~150 steps and which then contributed no gradient for the
     rest of the run -- the erosion effect shaped only the opening couple of
-    percent of training. Requiring the
-    constraint to hold in EACH sub-band is strictly harder to satisfy, so it
-    stays engaged, without pushing tonality below the target (which would erode
-    real cymbal and string detail rather than squeaks).
+    percent of training. Requiring the constraint to hold in EACH sub-band is
+    strictly harder to satisfy, so it stays engaged, without pushing tonality
+    below the target (which would erode real cymbal and string detail rather
+    than squeaks).
     """
     total = y.new_zeros(())
     for lo, hi in bands:

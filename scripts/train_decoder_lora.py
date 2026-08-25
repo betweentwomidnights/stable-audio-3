@@ -342,11 +342,11 @@ def main():
     # gained +2.2 dB at 16-22 kHz, so restored air may be what is actually
     # audible. Only applies to buckets with paired audio.
     #
-    # DEFAULT 0: this term did not survive its own trial. At weight 1.0 it is
-    # not a garnish -- measured 1.35-5.37 against a reconstruction term of
-    # 1.12-2.70 -- so it competes with reconstruction for a rank-16 adapter's
-    # capacity and reconstruction loses. Raise it deliberately if you want to
-    # test the "restored air" hypothesis, not by leaving it on.
+    # DEFAULT 0: this term did not survive its own trial. The run that
+    # introduced it, at weight 1.0 on a rank-16 SAME-L adapter, was rejected
+    # because the term competed with reconstruction for adapter capacity and
+    # reconstruction lost. Raise it deliberately if you want to test the
+    # "restored air" hypothesis, not by leaving it on.
     p.add_argument(
         "--lambda_hfband",
         type=float,
@@ -662,35 +662,65 @@ def main():
 
             y_mono = to_mono(y[0]).unsqueeze(0)
             t_mono = to_mono(target[0]).unsqueeze(0) if target is not None else None
-            l_ton = hf_tonality_penalty_multiband(
-                y_mono,
-                sr,
-                target_audio=t_mono,
-                target_db=ref_tonality if target is None else None,
-                bands=tonality_bands,
+
+            # Optional terms are computed even at weight 0, but under no_grad
+            # when they are off. Two reasons, and they pull the same way:
+            #
+            #   - The logged magnitude is how you choose a weight. --lambda_patch
+            #     defaults to 0 and is the term you most need to calibrate, so a
+            #     run with it off is exactly when you go looking for its value.
+            #     Gating the computation printed 0.00e+00 there -- the one number
+            #     the doc tells you to compare against stock, missing precisely
+            #     when you need it.
+            #   - Computing an unweighted term WITH grad puts it in the graph for
+            #     backward to walk every step in exchange for a multiply by zero.
+            #
+            # So: real tensor when it counts, cheap honest number when it does not.
+            def _diag(fn, active):
+                if active:
+                    return fn()
+                with torch.no_grad():
+                    return fn()
+
+            l_ton = _diag(
+                lambda: hf_tonality_penalty_multiband(
+                    y_mono,
+                    sr,
+                    target_audio=t_mono,
+                    target_db=ref_tonality if target is None else None,
+                    bands=tonality_bands,
+                ),
+                cli.lambda_tonal > 0,
             )
             # No paired audio for DiT latents, so there is nothing to match band
             # energy against -- skip rather than invent a target.
             l_hf = y.new_zeros(())
             if target is not None:
-                l_hf = hf_band_match_loss(y_mono, t_mono, sr)
+                l_hf = _diag(
+                    lambda: hf_band_match_loss(y_mono, t_mono, sr),
+                    cli.lambda_hfband > 0,
+                )
 
             # Applies to EVERY bucket, deliberately: the artifact is in the
             # waveform and needs no paired audio to detect, so this is the only
             # waveform-domain term the dit bucket gets. Measured on stock, dit
             # decodes already carry 6-9x the grid structure of a real-audio
             # round trip, so that bucket is where it matters most.
-            l_patch = y.new_zeros(())
-            if cli.lambda_patch > 0:
-                l_patch = patch_grid_penalty(y, patch=cli.patch_size)
-
-            loss = (
-                cli.lambda_rec * l_rec
-                + cli.lambda_cycle * l_cyc
-                + cli.lambda_tonal * l_ton
-                + cli.lambda_hfband * l_hf
-                + cli.lambda_patch * l_patch
+            l_patch = _diag(
+                lambda: patch_grid_penalty(y, patch=cli.patch_size),
+                cli.lambda_patch > 0,
             )
+
+            # Only weighted terms enter the loss. The others are diagnostics
+            # computed under no_grad above, and adding 0 * <no_grad tensor> would
+            # be a silent no-op at best.
+            loss = cli.lambda_rec * l_rec + cli.lambda_cycle * l_cyc
+            if cli.lambda_tonal > 0:
+                loss = loss + cli.lambda_tonal * l_ton
+            if cli.lambda_hfband > 0:
+                loss = loss + cli.lambda_hfband * l_hf
+            if cli.lambda_patch > 0:
+                loss = loss + cli.lambda_patch * l_patch
             if not torch.isfinite(loss):
                 print(
                     f"[train] step {step}: non-finite loss "

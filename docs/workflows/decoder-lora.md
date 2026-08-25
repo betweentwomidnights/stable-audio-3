@@ -167,7 +167,7 @@ LoRAs measured drift deltas under half a percent. Generate its latents with
 | `--lambda_cycle` | `‖E(D(z)) − z‖ / ‖z‖`, encoder frozen | **the load-bearing term** — trains the decoder to emit audio the frozen encoder maps back to the same latent |
 | `--lambda_tonal` | one-sided HF tonality penalty | pushes invented narrowband HF toward noise |
 | `--lambda_patch` | patch-grid structure penalty | see below — not optional if you intend to ship the result |
-| `--lambda_hfband` | two-sided HF band-energy match | **off by default.** Tests whether restored top octave, rather than reduced peakiness, is what the ear rewards. At 1.0 it measures 1.35–5.37 against a reconstruction term of 1.12–2.70, so it competes with reconstruction for a rank-16 adapter's capacity and reconstruction loses. Raise it deliberately or not at all. |
+| `--lambda_hfband` | two-sided HF band-energy match | **off by default** — see below |
 
 Two deliberate choices worth knowing about:
 
@@ -179,6 +179,14 @@ the wrong way.
 **The tonality penalty is one-sided.** A symmetric version would punish the
 decoder for legitimate tonal HF — cymbal ring, sibilance, guitar harmonics. It
 only ever pushes toward noise, never away from it.
+
+**`--lambda_hfband` is off because it lost its own trial.** It tests a real
+hypothesis — that what the ear rewards is the top octave coming back rather than
+peakiness going down, which is what the listening evidence pointed at. But the
+run that introduced it, at weight 1.0 on a rank-16 SAME-L adapter, was rejected:
+the term competed with reconstruction for the adapter's capacity and
+reconstruction lost. It is kept, at 0, because the hypothesis has not been
+settled — not because it is a garnish you can leave on.
 
 **There is no discriminator.** Adversarial training is how you make a decoder
 invent *more* detail. The failure mode of plain reconstruction losses — smoother,

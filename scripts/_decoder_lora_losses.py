@@ -159,7 +159,8 @@ def patch_grid_penalty(y, patch=256, eps=1e-8):
 
     Real audio has no reason to correlate with the grid, so flat is the correct
     answer and any deviation is artifact. Measured on 20 s crops: real audio
-    2-4e-4, stock decode 9e-4..1.4e-3, squeakfix_v1 1.9e-2 at strength 1.
+    2-4e-4, stock decode 9e-4..1.4e-3, and an adapter trained WITHOUT this term
+    1.9e-2 at strength 1 -- roughly 20x the stock value.
 
     Two shapes, because the artifact uses both:
       coherent   a fixed additive stamp, which survives averaging over patches
@@ -208,12 +209,12 @@ def hf_band_match_loss(
 ):
     """Match HF band ENERGY to the target. Two-sided, unlike the tonality term.
 
-    Added for v2 on listening evidence. The case the ear picked out as clearly
-    better -- koan breakcore/neurofunk s777, single pass -- moved only -0.69 dB
-    on tonality and not at all at 8-12 kHz, but gained +2.2 dB at 16-22 kHz.
-    Across every A/B we ran, 16-22 kHz went UP with the adapter (+0.74 to +7.95).
-    So the audible improvement may be the top octave coming back rather than
-    peakiness going down, and v1 measured that without ever optimising for it.
+    Added on listening evidence. The case the ear picked out as clearly better --
+    a breakcore/drum-and-bass generation, single pass -- moved only -0.69 dB on
+    tonality and not at all at 8-12 kHz, but gained +2.2 dB at 16-22 kHz. Across
+    every A/B run, 16-22 kHz went UP with the adapter (+0.74 to +7.95). So the
+    audible improvement may be the top octave coming back rather than peakiness
+    going down, which earlier adapters achieved without ever optimising for it.
 
     Two-sided on purpose: losing air and inventing air are both wrong. The
     round-trip probes showed the failure does BOTH -- it drains 16-22 kHz while

@@ -214,11 +214,11 @@ def save_lora_safetensors(state_dict, lora_config, path, dtype=torch.float16):
             relative precision can be amplified hard by the 12-layer stack: a
             RANDOM rank-8 encoder adapter rounded to fp16 -- in memory, no save
             or load involved -- moved the latent by 25-45% of its own effect.
-            That is a worst case, not a typical one; the shipped TRAINED decoder
-            adapter (squeakfix_v1, rank 16) re-rounds at 0.8%. Whether a trained
-            encoder adapter behaves like the random case or the trained decoder
-            one is unknown until there is one, and fp32 costs a doubled file
-            size to make the question moot.
+            That is a worst case, not a typical one: a TRAINED rank-16 decoder
+            adapter re-rounds at 0.8%. Whether a trained encoder adapter behaves
+            like the random case or like the trained decoder one is unknown until
+            there is one, and fp32 costs only a doubled file size to make the
+            question moot.
     """
     metadata = {"lora_config": json.dumps(lora_config)}
     cast = {k: (v.to(dtype) if v.is_floating_point() else v)

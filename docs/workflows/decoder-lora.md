@@ -322,10 +322,15 @@ improve every screen in this document.
 
 Neither half of the autoencoder is bit-deterministic:
 
-| quantity | floor |
+| quantity | floor (on one clip) |
 |---|---|
 | encoder: two encodes of the same audio | **1.50 %** relative |
 | decoder: two decodes of the same latent | **7.0e-3** max abs |
+
+**Measure your own.** These are not constants. The decoder's forward pass carries
+`mask_noise`, so its floor is material-dependent — the same measurement on a
+transient-heavy clip gives **1.9e-2**, nearly 3x the number above. Re-measure on
+the material you are testing, then express your deltas as a multiple of that.
 
 Consequences:
 
@@ -333,8 +338,9 @@ Consequences:
   floor.
 - **The cycle loss has an irreducible floor of ~1.5 %.** Training cannot drive
   `‖E(D(z))−z‖/‖z‖` below it. That is the target, not zero.
-- Any audio A/B must be expressed as a multiple of the 7e-3 decoder floor.
-  Absolute tolerances are meaningless.
+- Any audio A/B must be expressed as a multiple of the decoder floor **you
+  measured on that material**. Absolute tolerances are meaningless, and so is
+  reusing someone else's floor.
 
 ---
 
@@ -361,14 +367,14 @@ step. It applies equally to plain generation, continuation and transform.
 Attaching is not the same as loading. `load_state_dict(strict=False)` will accept
 a state dict whose every key misses, leaving a correctly-shaped, correctly-counted
 adapter full of zeros that reports as a clean load and does nothing. Assert on
-**output**, against the decoder's 7e-3 nondeterminism floor:
+**output**, against a nondeterminism floor you measure on the same audio:
 
 ```python
 z = ae.encode(x)
-before = ae.decode(z).clone()
+a = ae.decode(z).clone()
+floor = (ae.decode(z) - a).abs().max()      # two decodes of the SAME latent
 load_and_apply_loras(ae, [ckpt], "autoencoder")
-after = ae.decode(z)
-assert (after - before).abs().max() > 10 * 7e-3
+assert (ae.decode(z) - a).abs().max() > 10 * floor
 ```
 
 Strength control reaches the pretransform, so `set_lora_strength(ae.decoder, 0.0)`
@@ -395,6 +401,17 @@ Each of these produces plausible-looking numbers while being wrong.
   nothing.
 - **LoRA `alpha` must match between build and checkpoint** (`scaling = alpha/rank`),
   or a reload is `rank`× stronger than what was saved.
+- **The eval window has to exist inside the clip.** `--eval_offset` skips the
+  head of `--eval_audio` so a fade-in does not dominate the ladder, and it
+  defaults to 20 s. On a clip shorter than `--eval_offset + --eval_seconds` the
+  trainer now moves the window earlier and says so; a clip shorter than
+  `--eval_seconds` is evaluated whole with a warning that its ladder numbers are
+  not comparable to a full-window run. Both used to happen silently, or die
+  inside the encoder with a shape error.
+- **Sigma-interval and layer-filter controls do not reach autoencoder adapters.**
+  That gating lives in the DiT's forward pass, so for a `decoder` or `encoder`
+  target only *strength* applies. The controls are inert rather than wrong -- they
+  cannot affect the adapter at all -- but nothing currently hides them.
 - **Tonality is a detector, not an annoyance predictor.** It is what found the
   artifact, but a clip can score well and still sound wrong. Screen on ears and on
   percussion-dense material.

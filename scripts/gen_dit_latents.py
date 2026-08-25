@@ -7,9 +7,9 @@ encoder's own output on real audio. That gap is in the BASE model, so the decode
 needs to see generated latents during training or it will only ever be corrected
 on the real-audio distribution it already handles best.
 
-It is deliberately BASE-only. kev/koan measured drift deltas under half a
-percent against base on identical prompts, so adapter-specific latents buy
-nothing -- what the LoRAs change is how much HF content is present, not how
+It is deliberately BASE-only. Two trained DiT LoRAs measured drift deltas under
+half a percent against base on identical prompts, so adapter-specific latents buy
+nothing -- what a DiT LoRA changes is how much HF content is present, not how
 well-formed the latent is.
 
 Usage:

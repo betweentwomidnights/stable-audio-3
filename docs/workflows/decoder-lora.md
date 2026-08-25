@@ -337,12 +337,25 @@ should evaluate one. Example measurements from the published checkpoint — tona
 frames (>12 dB tonality, 6–16 kHz) on 2-minute generations, mean of 4, the
 adapter the only variable:
 
-| depth | stock | adapted | |
-|---|---|---|---|
-| d0 — fresh generation | 363 | 422 | −16% |
-| d1 — one transform or continuation | 431 | 450 | −4% |
-| d2 | 823 | 518 | **37% fewer** |
-| d3 | 1664 | 615 | **63% fewer** |
+| depth | stock | adapted | | 12–16 kHz (stock → adapted) | SI-SDR vs own d0 |
+|---|---|---|---|---|---|
+| d0 — fresh generation | 364 | 422 | −16% | −5.6 → −5.3 | — |
+| d1 — one transform or continuation | 432 | 445 | −3% | −6.2 → −5.5 | 14.7 → 18.3 |
+| d2 | 821 | 519 | **37% fewer** | −6.6 → −5.6 | 10.1 → 13.7 |
+| d3 | 1665 | 619 | **63% fewer** | −7.1 → −5.8 | 7.8 → 11.2 |
+
+**Read the last two columns before believing the first.** A tonal-frame count can
+fall because the artifact went away *or* because the content did, and an adapter
+that quietly sands the top end will post an excellent frame count. Here it does
+not: at every depth the adapted render holds more 12–16 kHz energy than stock,
+sits marginally louder in RMS, and stays closer to its own depth-0 render
+(SI-SDR 11.2 against stock's 7.8 by d3) — so it is drifting less with depth, not
+erasing what drifts. The 8–12 kHz band does drop (+2.7 → +1.1 by d3), which is
+the band the artifact piles into.
+
+Always pair a frame count at depth with a content measure. Reading the count
+alone once produced a confident "the benefit grows with depth" on an adapter that
+was, at that depth, deleting the audio.
 
 **The squeak is audible at d0 by ear — hi hats and snares especially — and none
 of the metrics here show it.** Flat or slightly negative at d0: tonality p95 in

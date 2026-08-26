@@ -108,7 +108,7 @@ def main(args):
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=min(4, os.cpu_count() or 1),
+        num_workers=args.num_workers,
         drop_last=False,
         collate_fn=collation_fn,
     )
@@ -208,6 +208,18 @@ if __name__ == "__main__":
         "docs/workflows/encoder-lora.md",
     )
     parser.add_argument("--encoder_lora_strength", type=float, default=1.0)
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="DataLoader workers; 0 loads in-process. Windows spawns rather "
+        "than forks, so the workers re-import this module and re-pickle the "
+        "dataset (captions arrive through a custom_metadata_fn, hence dill), "
+        "and a worker that dies there surfaces only as 'DataLoader worker "
+        "exited unexpectedly' with no cause. 0 both diagnoses that and works "
+        "around it, at little cost here: a pre-encode is one pass over a "
+        "corpus and the GPU is the bottleneck, not the decode.",
+    )
     parser.add_argument(
         "--random_crop",
         action="store_true",

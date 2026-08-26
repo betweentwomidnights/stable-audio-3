@@ -133,6 +133,70 @@ from stable_audio_3.models.lora.utils import (  # noqa: E402
 # --------------------------------------------------------------------------
 
 
+# How many crops to draw looking for one that passes the gate before giving up
+# and taking the last. Only reached when a source sits almost entirely under its
+# own threshold, which a self-calibrating threshold makes unlikely.
+_GATE_MAX_TRIES = 12
+
+
+class TonalityGate:
+    """Keep the more tonal share of each source's crops, per source.
+
+    The threshold is RE-DERIVED from the crops training actually draws, rather
+    than fixed once from a probe. Two reasons, and the second is the one that
+    bites across datasets:
+
+      * The probe sampled every file in a source, including the clips later held
+        out for eval, while training draws only from the rest. On the ratatat
+        set that gap turned a requested p50 into a measured 66% rejection rate.
+      * A fixed dB threshold means a different acceptance RATE on every dataset,
+        because it is the material's own tonality distribution that decides how
+        much sits above it. `--tonality_percentile 50` should mean "the top half
+        of THIS dataset" whatever the dataset is; a number in dB cannot.
+
+    Values are recorded before the accept/reject decision, so the window holds
+    the material's true distribution and not just the part that already passed.
+    """
+
+    def __init__(self, percentile, seed_values=None, window=512):
+        self.pct = percentile
+        self.window = window
+        self.vals = {k: list(v)[-window:] for k, v in (seed_values or {}).items()}
+        self.floor = {
+            k: float(np.percentile(v, percentile)) for k, v in self.vals.items() if v
+        }
+        self.seen = 0
+        self.passed = 0
+
+    def observe(self, source, value):
+        if self.pct <= 0 or source is None:
+            return
+        v = self.vals.setdefault(source, [])
+        v.append(value)
+        if len(v) > self.window:
+            del v[: len(v) - self.window]
+        # Recomputed periodically rather than per draw: a percentile over the
+        # whole window every step is pure overhead beside an encode, and the
+        # threshold moves slowly once the window is populated.
+        if len(v) >= 16 and len(v) % 32 == 0:
+            self.floor[source] = float(np.percentile(v, self.pct))
+
+    def accepts(self, source, value):
+        self.seen += 1
+        f = self.floor.get(source) if self.pct > 0 else None
+        ok = f is None or value >= f
+        self.passed += bool(ok)
+        return ok
+
+    def acceptance(self):
+        return self.passed / self.seen if self.seen else float("nan")
+
+    def describe(self):
+        return ", ".join(
+            f"{Path(k).name} {v:.2f}dB" for k, v in sorted(self.floor.items())
+        )
+
+
 def rng_snapshot(device):
     """Capture enough RNG state to replay a forward pass exactly."""
     cuda = (
@@ -593,10 +657,20 @@ def main():
     # is the same distribution skew again, arriving through the gate instead of
     # through the folder.
     source_of = {f: d for d, got in by_source.items() for f in got}
-    tonality_floor = {}
-    if cli.tonality_percentile > 0:
-        per_source_probe = max(8, cli.tonality_probe_crops // len(by_source))
-        for d, got in by_source.items():
+    # Probe the TRAINING pool only. by_source still lists every file in each
+    # source, but the eval clips were carved out of `files` above, so probing
+    # `got` measured material training never sees -- which is one of the two
+    # reasons a requested p50 realised as 66% rejection. The gate re-derives its
+    # threshold from real draws afterwards; this only has to start it close.
+    train_files = set(files)
+    probe_source = {
+        d: [f for f in got if f in train_files] for d, got in by_source.items()
+    }
+    probe_source = {d: got for d, got in probe_source.items() if got}
+    seed_vals = {}
+    if cli.tonality_percentile > 0 and probe_source:
+        per_source_probe = max(8, cli.tonality_probe_crops // len(probe_source))
+        for d, got in probe_source.items():
             vals = []
             tries = 0
             while len(vals) < per_source_probe and tries < 10 * per_source_probe:
@@ -608,13 +682,15 @@ def main():
                     continue
                 vals.append(float(hf_tonality(to_mono(w[0]).to(device), sr)))
             if vals:
-                tonality_floor[d] = float(np.percentile(vals, cli.tonality_percentile))
+                seed_vals[d] = vals
                 print(
                     f"[train] tonality gate [{Path(d).name}]: {len(vals)} "
                     f"crops, min {min(vals):.2f} / med {np.median(vals):.2f} "
-                    f"/ max {max(vals):.2f} dB -> keep above "
-                    f"{tonality_floor[d]:.2f} (p{cli.tonality_percentile:g})"
+                    f"/ max {max(vals):.2f} dB -> start above "
+                    f"{np.percentile(vals, cli.tonality_percentile):.2f} "
+                    f"(p{cli.tonality_percentile:g}, re-derived as it runs)"
                 )
+    gate = TonalityGate(cli.tonality_percentile, seed_vals)
 
     # ---- held-out eval material -----------------------------------------
     eval_clips = []
@@ -722,6 +798,7 @@ def main():
     step = 0
     skipped = 0
     rejected = 0
+    gate_exhausted = 0
     failed = 0
     grad_checked = False
 
@@ -749,32 +826,48 @@ def main():
                     x = ae.decode(z_ref).float()
                 snap = None
             else:
-                src_path = rng.choice(files)
-                w = random_crop(src_path, sr, cli.crop_seconds, rng, multiple=ds_ratio)
-                if w is None:
-                    skipped += 1
-                    if step == 0 and skipped > 200:
-                        print(
-                            "[train] 200+ unusable crops before a single "
-                            "step; check --data_dir and --crop_seconds"
-                        )
-                        return 1
-                    continue
-                x = w.to(device)
-                floor = tonality_floor.get(source_of.get(src_path))
-                if floor is not None:
-                    if float(hf_tonality(to_mono(x[0]), sr)) < floor:
-                        rejected += 1
-                        if rejected > 200 and rejected > 20 * (step + 1):
+                # Retry inside the REAL bucket, never by falling back to the
+                # loop head. A `continue` there re-draws the BUCKET, and since
+                # the gen bucket is never gated, every rejection became a fresh
+                # coin flip that gen was likelier to survive -- so a requested
+                # 50/50 mix arrived as 25/75 on this dataset, and as something
+                # else on the next one. That silently made two datasets two
+                # different experiments.
+                x = None
+                for _ in range(_GATE_MAX_TRIES):
+                    src_path = rng.choice(files)
+                    w = random_crop(
+                        src_path, sr, cli.crop_seconds, rng, multiple=ds_ratio
+                    )
+                    if w is None:
+                        skipped += 1
+                        if step == 0 and skipped > 200:
                             print(
-                                "[train] ABORT: the tonality gate is "
-                                f"rejecting almost everything ({rejected} "
-                                f"rejected, {step} steps). The probe "
-                                "threshold does not match the training "
-                                "files; lower --tonality_percentile."
+                                "[train] 200+ unusable crops before a single "
+                                "step; check --data_dir and --crop_seconds"
                             )
                             return 1
                         continue
+                    cand = w.to(device)
+                    src = source_of.get(src_path)
+                    ton = float(hf_tonality(to_mono(cand[0]), sr))
+                    # Measured on EVERY drawn crop, before accept/reject, so the
+                    # window sees the material's true distribution rather than
+                    # the part that already passed. That is what lets the
+                    # threshold be re-derived from it without censoring bias.
+                    gate.observe(src, ton)
+                    if gate.accepts(src, ton):
+                        x = cand
+                        break
+                    rejected += 1
+                if x is None:
+                    # Every try in a row was gated out. Taking the last one beats
+                    # dropping the step, which would put us back to skewing the
+                    # mix by exactly the route this loop exists to close. A
+                    # self-calibrating threshold makes this rare by
+                    # construction; it stays as a floor for pathological input.
+                    x = cand
+                    gate_exhausted += 1
                 with torch.no_grad():
                     snap = rng_snapshot(device)
                     set_lora_strength(ae.encoder, 0.0)
@@ -883,6 +976,9 @@ def main():
                 f"|g| {m['gnorm']:.4f}  "
                 f"lr {lr_at(step):.2e}  "
                 f"[{counts['real']}r/{counts['gen']}g]  "
+                # The realised bucket mix and gate acceptance, because both
+                # used to be inferable only by squinting at the r/g counter.
+                f"acc {100 * gate.acceptance():.0f}%  "
                 f"{el / step:.2f}s/step"
             )
             running = {}
@@ -958,7 +1054,9 @@ def main():
 
     print(
         f"\n[train] done in {(time.time() - t0) / 60:.1f} min "
-        f"({rejected} crops rejected by the tonality gate, "
+        f"(gate: {100 * gate.acceptance():.1f}% of drawn crops accepted vs "
+        f"p{cli.tonality_percentile:g} requested; floors {gate.describe()}; "
+        f"{rejected} rejected, {gate_exhausted} steps took an unpassed crop; "
         f"{skipped} unusable, {failed} failed)"
     )
     return 0

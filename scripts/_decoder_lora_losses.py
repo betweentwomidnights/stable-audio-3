@@ -1,8 +1,9 @@
 """Losses for the SAME decoder LoRA.
 
-Five terms. The first three are the core of the objective and aimed at the two
-things the probes actually measured; the last two exist because of artifacts the
-first three provably cannot see.
+Six terms. The first three are the core of the decoder objective and aimed at
+the two things the probes actually measured; the next two exist because of
+artifacts the first three provably cannot see; the last belongs to the ENCODER
+trainer, which shares this module.
 
   reconstruction   multi-resolution log-STFT L1, K-weighted. Keeps the decoder
                    honest and stops the other terms finding degenerate wins.
@@ -43,6 +44,10 @@ first three provably cannot see.
                    adapter's capacity and reconstruction loses. Kept because the
                    hypothesis it tests (that restored top octave, not reduced
                    peakiness, is what the ear rewards) has not been settled.
+
+  anchor           (encoder trainer) keeps a re-trained encoder inside the
+                   latent space the DiT was trained on. Not used by the decoder
+                   trainer, where the encoder is frozen by construction.
 
 Note on K-weighting: decoder fine-tunes that target the OPPOSITE defect -- a VAE
 dull above 6 kHz -- remove the perceptual HF de-emphasis to force more high end
@@ -125,6 +130,36 @@ def cycle_loss(z_rt, z):
     noise for both passes and the floor disappears.)
     """
     return relative_latent_error(z_rt, z)
+
+
+def anchor_loss(z_new, z_ref, budget=0.0):
+    """Keep a re-trained encoder inside the latent space the DiT was trained on.
+
+    Load-bearing, not polish. Latent inversion showed the optimal latent sits
+    21-30% away from E(x) (mean 25.8%), so a pure audio loss against a frozen
+    decoder will happily walk the encoder that far. Generation would survive
+    that -- the DiT feeds the decoder directly and the encoder is uninvolved --
+    but init_audio, continuation and transform all encode real audio and hand
+    the result to the DiT, which is exactly the distribution shift that would
+    break the paths this work is for.
+
+    `budget` makes it a hinge rather than a spring: below `budget` relative
+    error there is no gradient at all, so reconstruction is free to use the
+    whole allowance, and above it the term pushes back. That lets the budget be
+    stated as a number one can defend ("stay within 5% of the stock encoder")
+    instead of being an emergent property of a weight. budget=0 recovers a plain
+    relative-L2 pull toward z_ref, which is what the DiT-latent bucket wants:
+    there z_ref is a latent the DiT itself produced, so moving all the way onto
+    it is the goal, not a risk.
+
+    Callers should compute z_ref under the SAME RNG state as z_new. Otherwise
+    mask_noise alone puts ~1.5% of junk in this term, which is a third of a
+    typical budget.
+    """
+    err = relative_latent_error(z_new, z_ref)
+    if budget > 0:
+        return (err - budget).clamp(min=0.0)
+    return err
 
 
 def patch_grid_penalty(y, patch=256, eps=1e-8):

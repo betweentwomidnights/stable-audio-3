@@ -21,9 +21,17 @@ that from transients actually degrading.
 """
 
 import math
+import os
+import sys
 
 import torch
 import torchaudio
+
+# Sibling-module import, so this file works whether it is imported by a script in
+# this directory or executed directly. Matches what the trainers do.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _decoder_lora_losses import multires_stft_loss  # noqa: E402
 
 EPS = 1e-10
 BANDS = [
@@ -328,3 +336,40 @@ def onset_locked_stats(ratio_db, valid, onsets, n_frames, sr, hop, window_s=0.12
         return float("nan"), float("nan"), float("nan"), int(onsets.numel())
     on_m, off_m = float(on.mean()), float(off.mean())
     return on_m, off_m, on_m - off_m, int(onsets.numel())
+
+
+def describe(wav, target, sr, ea, onsets):
+    """Reconstruction quality of `wav` against `target`."""
+    mono_w = to_mono(wav).float()
+    mono_t = to_mono(target).float()
+    n = min(mono_w.shape[-1], mono_t.shape[-1])
+    mono_w, mono_t = mono_w[:n], mono_t[:n]
+    mag = stft(mono_w, ea.n_fft, ea.hop).abs()
+    bands = band_energies_db(mag, ea.n_fft, sr)
+    tmean, t95, _ = spectral_flatness_db(
+        mag, ea.n_fft, sr, ea.tonality_lo, ea.tonality_hi
+    )
+    stats, _, _, fr = analyse(wav, target, sr, ea)
+    on_m, off_m, excess, _ = onset_locked_stats(
+        fr["ratio_db"],
+        fr["valid"],
+        onsets,
+        fr["ratio_db"].numel(),
+        sr,
+        ea.hop,
+        window_s=ea.onset_window,
+    )
+    return {
+        "stft_loss": float(
+            multires_stft_loss(mono_w.unsqueeze(0), mono_t.unsqueeze(0), sr=sr)
+        ),
+        "si_sdr_db": si_sdr(mono_w, mono_t),
+        "tonality_p95": t95,
+        "tonality_mean": tmean,
+        "onset_artifact_db": on_m,
+        "steady_artifact_db": off_m,
+        "a2s_median": stats["artifact_to_signal_db_median"],
+        "band_8_12k": bands["brill_8k_12k"],
+        "band_12_16k": bands["air_12k_16k"],
+        "band_16_22k": bands["top_16k_22k"],
+    }

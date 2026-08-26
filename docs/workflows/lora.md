@@ -6,8 +6,9 @@ By default a LoRA adapts the **diffusion transformer** — how latents are produ
 A checkpoint can instead declare `target: "decoder"` or `target: "encoder"` in its
 config and adapt the **autoencoder**, changing how latents are rendered to audio
 (or how audio is encoded to latents) instead. See
-[Decoder LoRA](decoder-lora.md). Checkpoints with no `target` are DiT LoRAs, so
-everything trained before that field existed keeps working unchanged.
+[Decoder LoRA](decoder-lora.md) and [Encoder LoRA](encoder-lora.md). Checkpoints
+with no `target` are DiT LoRAs, so everything trained before that field existed
+keeps working unchanged.
 
 ## What You Need
 

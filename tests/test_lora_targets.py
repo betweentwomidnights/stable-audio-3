@@ -327,7 +327,9 @@ def test_save_dtype_fp32_round_trips_exactly(tmp_path):
     "script",
     [
         "train_decoder_lora.py",
+        "train_encoder_lora.py",
         "gen_dit_latents.py",
+        "pre_encode_dataset.py",
         "_decoder_lora_losses.py",
         "_decoder_lora_eval.py",
     ],
@@ -387,7 +389,10 @@ def test_decoder_lora_docs_reference_real_files():
         "scripts/_decoder_lora_losses.py",
         "scripts/_decoder_lora_eval.py",
         "scripts/gen_dit_latents.py",
+        "scripts/train_encoder_lora.py",
+        "scripts/pre_encode_dataset.py",
         "docs/workflows/decoder-lora.md",
+        "docs/workflows/encoder-lora.md",
         "tests/test_lora_targets.py",
     ]
     pattern = re.compile(

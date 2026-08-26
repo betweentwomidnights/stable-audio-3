@@ -3,6 +3,8 @@
 A LoRA on the autoencoder's **decoder** rather than on the DiT. It changes how
 latents are rendered to audio, not how latents are produced.
 
+For the other half of the pair, see [Encoder LoRA](encoder-lora.md).
+
 > **Scope.** Everything measured in this document is **SAME-L**. The mechanism
 > and the trainer are not specific to it, but no number here has been reproduced
 > on SAME-S, and there is reason to expect it to behave differently — see

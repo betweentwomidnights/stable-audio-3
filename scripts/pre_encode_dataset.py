@@ -28,6 +28,9 @@ from torch.nn import functional as F
 
 from stable_audio_3 import AutoencoderModel
 from stable_audio_3.model_configs import ae_models
+from stable_audio_3.models.lora.loader import load_and_apply_loras
+from stable_audio_3.models.lora.model import set_lora_strength
+from stable_audio_3.models.lora.utils import get_lora_params
 from stable_audio_3.data.dataset import (
     LocalDatasetConfig,
     SampleDataset,
@@ -46,6 +49,29 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ae = AutoencoderModel.from_pretrained(args.model, device=str(device))
+
+    if args.encoder_lora:
+        # Pre-encoding with an adapted encoder changes the TRAINING TARGETS a
+        # downstream LoRA learns from, so this is not a cosmetic flag: latents
+        # written with it are not interchangeable with stock ones, and mixing
+        # the two in one dataset is a silent way to get an incoherent corpus.
+        load_and_apply_loras(ae.autoencoder, [args.encoder_lora], "autoencoder")
+        n_enc = len(list(get_lora_params(ae.autoencoder.encoder)))
+        if n_enc == 0:
+            raise SystemExit(
+                f"{args.encoder_lora} attached no tensors to the encoder. A "
+                f'checkpoint needs `target: "encoder"` in its config to land '
+                f"here; a DiT or decoder adapter will load without complaint "
+                f"and do nothing."
+            )
+        set_lora_strength(
+            ae.autoencoder.encoder, args.encoder_lora_strength, lora_index=0
+        )
+        print(
+            f"Encoder LoRA: {args.encoder_lora} -> {n_enc} tensors "
+            f"@ strength {args.encoder_lora_strength}"
+        )
+
     if args.model_half:
         ae.autoencoder = ae.autoencoder.half()
 
@@ -58,7 +84,26 @@ def main(args):
         sample_size=args.sample_size,
         sample_rate=ae.sample_rate,
         force_channels="stereo",
+        # SampleDataset defaults to random_crop=True. For a track LONGER than
+        # --sample_size that picks a random offset, so two pre-encodes of the
+        # same corpus encode different audio. A one-shot pass has no use for a
+        # random crop -- LoRA training does its own cropping in latent space,
+        # which is where that augmentation belongs.
+        random_crop=args.random_crop,
     )
+    if not args.phase_flip:
+        # SampleDataset hardcodes augs = Sequential(PhaseFlipper(p=0.5)), which
+        # inverts polarity on a coin flip. During TRAINING that is fair: a clip
+        # is seen many times, so it is seen both ways. In a ONE-SHOT pre-encode
+        # each track is encoded exactly once, so the flip adds no diversity and
+        # only makes the output irreproducible. Polarity is inaudible, but the
+        # encoder is nonlinear, so z(-x) is essentially UNCORRELATED with z(x):
+        # two stock pre-encodes of one corpus measured 78% apart on average
+        # (~141% on the tracks that flipped, ~6% on those that did not) against
+        # an encoder noise floor of 1.31%. That silently destroys any controlled
+        # comparison between two sets of latents.
+        dataset.augs = torch.nn.Identity()
+
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -154,6 +199,26 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--pad", action="store_true", help="Pad audio samples to --sample_size"
+    )
+    parser.add_argument(
+        "--encoder_lora",
+        default=None,
+        help="encoder-targeted LoRA (.safetensors) to encode through. Changes "
+        "the latents a downstream LoRA trains on; see "
+        "docs/workflows/encoder-lora.md",
+    )
+    parser.add_argument("--encoder_lora_strength", type=float, default=1.0)
+    parser.add_argument(
+        "--random_crop",
+        action="store_true",
+        help="random crop offsets for tracks longer than --sample_size "
+        "(default off: a one-shot pre-encode should be reproducible)",
+    )
+    parser.add_argument(
+        "--phase_flip",
+        action="store_true",
+        help="restore SampleDataset's random polarity flip (default off: it "
+        "makes a one-shot pre-encode irreproducible without adding diversity)",
     )
     args = parser.parse_args()
 

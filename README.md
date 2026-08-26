@@ -258,6 +258,7 @@ Beyond inference, **[optimized/mlx](optimized/mlx)** and **[optimized/tflite](op
 | [MLX LoRA training](optimized/mlx/README.md#lora-training) | Finetune on Apple Silicon (pure-MLX); powers underfit's Mac backend |
 | [LoRA Training](docs/workflows/lora.md) | Fine-tune with LoRA: setup, training loop, and checkpointing |
 | [Decoder LoRA](docs/workflows/decoder-lora.md) | Adapt the autoencoder's decoder to fix round-trip artifacts in chained continuations |
+| [Encoder LoRA](docs/workflows/encoder-lora.md) | Adapt the autoencoder's encoder; improves the latents a dataset is pre-encoded to |
 | [Autoencoder Workflows](docs/workflows/autoencoder.md) | Encode and decode audio with the VAE directly |
 | [Prompting Guide](docs/guides/prompting.md) | Prompt and control signal reference |
 | [Model Overview](docs/guides/model-overview.md) | Architecture and design overview |

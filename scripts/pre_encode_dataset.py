@@ -14,12 +14,14 @@ Saves .npy files for latents and .json files for metadata, compatible with train
 Usage:
   uv run python scripts/pre_encode_dataset.py --model same-s --data_dir ./my_data --output_path ./latents_out
   uv run python scripts/pre_encode_dataset.py --model same-l --data_dir ./my_data --output_path ./latents_out --batch_size 4
+  uv run python scripts/pre_encode_dataset.py --model same-l --data_dir ./my_data --output_path ./latents_out --per_track_target_latent_rms 0.90
 """
 
 import argparse
 import gc
 import json
 import os
+import statistics
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +45,71 @@ def caption_metadata_fn(info, _audio):
     if not txt.exists():
         return {"__reject__": True}
     return {"prompt": txt.read_text().strip()}
+
+
+def _per_clip_latent_rms(z, metadata):
+    """Per-clip latent RMS over the valid (non-padded) region.
+
+    Padding is excluded on purpose. A short clip padded out to --sample_size
+    would otherwise have its RMS dragged toward zero by the padding, and the
+    correction below would over-drive the audio to compensate.
+    """
+    latent_len = z.shape[-1]
+    out = []
+    for i in range(z.shape[0]):
+        pm = metadata[i]["padding_mask"][0]
+        if not isinstance(pm, torch.Tensor):
+            pm = torch.as_tensor(pm)
+        mask = (
+            F.interpolate(pm.reshape(1, 1, -1).float(), size=latent_len, mode="nearest")
+            .reshape(-1)
+            .to(z.device)
+            .bool()
+        )
+        z_clip = z[i].float()
+        valid = z_clip[..., mask] if mask.any() else z_clip
+        out.append(valid.pow(2).mean().sqrt().clamp(min=1e-6).item())
+    return out
+
+
+def encode_with_per_track_norm(ae, audio, metadata, target_latent_rms, max_iters, tol):
+    """Iterative per-track latent-RMS normalization.
+
+    Why iterative: a single scale-the-audio-then-encode pass UNDERSHOOTS the
+    target, because the encoder is nonlinear. Requesting 0.90 lands around 0.82
+    in one pass. So encode at the current per-clip gain, measure the latent RMS,
+    multiply the gain by (target / measured), and repeat until every clip is
+    within `tol` (relative) or `max_iters` is reached.
+
+    The latents returned are exactly the ones last measured, so the reported
+    `achieved` figures describe the data actually written -- no extra encode
+    afterwards that could drift from what was reported.
+
+    Returns (latents, per_clip_gains, pre_norm_rms, achieved_rms, iters_used).
+    """
+    n = audio.shape[0]
+    gain = torch.ones(n, device=audio.device, dtype=audio.dtype)
+    pre_norm = None
+    iters_used = 0
+    for it in range(max_iters + 1):
+        with torch.no_grad():
+            z = ae.encode(audio * gain.view(-1, 1, 1), ae.sample_rate)
+        rms = _per_clip_latent_rms(z, metadata)
+        if it == 0:
+            pre_norm = list(rms)
+        iters_used = it
+        max_rel_err = max(abs(r - target_latent_rms) / target_latent_rms for r in rms)
+        if max_rel_err <= tol or it == max_iters:
+            achieved = list(rms)
+            latents = z
+            break
+        corr = torch.tensor(
+            [target_latent_rms / r for r in rms],
+            device=audio.device,
+            dtype=audio.dtype,
+        )
+        gain = gain * corr
+    return latents, gain.tolist(), pre_norm, achieved, iters_used
 
 
 def main(args):
@@ -127,6 +194,9 @@ def main(args):
             silence_latent = ae.encode(silence_audio, ae.sample_rate)
         np.save(silence_path, silence_latent.cpu().numpy())
 
+    per_track = args.per_track_target_latent_rms > 0
+    all_gains, all_pre, all_ach = [], [], []
+
     for nb, (audio, metadata) in enumerate(loader):
         print(f"Processing batch {nb}")
 
@@ -138,7 +208,24 @@ def main(args):
         if args.model_half:
             audio = audio.half()
 
-        latents = ae.encode(audio, ae.sample_rate)
+        if per_track:
+            (
+                latents,
+                gains,
+                pre_norm,
+                achieved,
+                iters_used,
+            ) = encode_with_per_track_norm(
+                ae,
+                audio,
+                metadata,
+                args.per_track_target_latent_rms,
+                args.norm_iters,
+                args.norm_tol,
+            )
+            print(f"  batch {nb}: norm settled in {iters_used} iter(s)")
+        else:
+            latents = ae.encode(audio, ae.sample_rate)
 
         for i, latent in enumerate(latents):
             latent_np = latent.cpu().numpy()
@@ -166,12 +253,47 @@ def main(args):
             np.save(os.path.join(args.output_path, f"{latent_id}.npy"), latent_np)
 
             md["padding_mask"] = padding_mask.cpu().numpy().tolist()
+            if per_track:
+                # Record what this latent actually got, so a set of latents is
+                # self-describing rather than relying on the command that made
+                # it being remembered correctly.
+                md["audio_gain_applied"] = float(gains[i])
+                md["latent_rms_pre_norm"] = float(pre_norm[i])
+                md["latent_rms_achieved"] = float(achieved[i])
+                all_gains.append(float(gains[i]))
+                all_pre.append(float(pre_norm[i]))
+                all_ach.append(float(achieved[i]))
             for k, v in md.items():
                 if isinstance(v, torch.Tensor):
                     md[k] = v.cpu().numpy().tolist()
 
             with open(os.path.join(args.output_path, f"{latent_id}.json"), "w") as f:
                 json.dump(md, f)
+
+    if per_track and all_ach:
+        tgt = args.per_track_target_latent_rms
+        worst = max(abs(r - tgt) / tgt for r in all_ach)
+        print(f"\n[per-track norm] {len(all_ach)} clips, target latent RMS = {tgt}")
+        print(
+            f"  pre-norm RMS  min={min(all_pre):.4f} "
+            f"mean={statistics.fmean(all_pre):.4f} "
+            f"median={statistics.median(all_pre):.4f} max={max(all_pre):.4f}"
+        )
+        print(
+            f"  ACHIEVED RMS  min={min(all_ach):.4f} "
+            f"mean={statistics.fmean(all_ach):.4f} "
+            f"median={statistics.median(all_ach):.4f} max={max(all_ach):.4f} "
+            f"std={statistics.pstdev(all_ach):.4f}"
+        )
+        print(
+            f"  applied gain  min={min(all_gains):.4f} "
+            f"mean={statistics.fmean(all_gains):.4f} max={max(all_gains):.4f}"
+        )
+        print(
+            f"  worst clip is {worst * 100:.2f}% from target "
+            f"(tol {args.norm_tol * 100:.0f}%, max_iters {args.norm_iters}). "
+            "Want the achieved mean at the target with a tight std."
+        )
 
     print("Done")
 
@@ -208,6 +330,32 @@ if __name__ == "__main__":
         "docs/workflows/encoder-lora.md",
     )
     parser.add_argument("--encoder_lora_strength", type=float, default=1.0)
+    parser.add_argument(
+        "--per_track_target_latent_rms",
+        type=float,
+        default=0.0,
+        help="If > 0, scale each clip individually so its encoded latent RMS "
+        "hits this target. Equalises latent scale across a dataset whose "
+        "tracks were mastered at different levels, so an adapter trained on "
+        "it does not also learn those level differences. Set it to the base "
+        "model's own latent scale (~0.90 for same-l). Default 0.0 = off.",
+    )
+    parser.add_argument(
+        "--norm_iters",
+        type=int,
+        default=4,
+        help="Max correction rounds for --per_track_target_latent_rms. The "
+        "encoder is nonlinear, so one pass undershoots; each round encodes "
+        "again, so cost is up to norm_iters+1 encodes per clip. Stops early "
+        "once every clip is within --norm_tol.",
+    )
+    parser.add_argument(
+        "--norm_tol",
+        type=float,
+        default=0.03,
+        help="Relative tolerance for --per_track_target_latent_rms "
+        "convergence. Default 0.03.",
+    )
     parser.add_argument(
         "--num_workers",
         type=int,

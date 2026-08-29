@@ -404,7 +404,13 @@ def test_decoder_lora_docs_reference_real_files():
     for rel in owned:
         f = root / rel
         assert f.exists(), f"{rel} is listed here but not in the repo"
-        for ref in sorted(set(pattern.findall(f.read_text()))):
+        # Explicit encoding: read_text() defaults to the locale's, which is
+        # cp1252 on Windows, and several of these files are UTF-8 (the dataset
+        # layout in pre_encode_dataset.py's docstring uses U+2190). That made
+        # this test pass on Linux and die on Windows with a UnicodeDecodeError
+        # from inside pathlib -- an encoding failure wearing a missing-file
+        # test's name.
+        for ref in sorted(set(pattern.findall(f.read_text(encoding="utf-8")))):
             if not (root / ref).exists():
                 missing.append(f"{rel} -> {ref}")
 

@@ -332,49 +332,64 @@ published checkpoint the ladder favoured step 3000–4000; step 2000 was chosen 
 re-encode behaviour and on ears. **Screen candidates on re-encode depth and on
 percussion-dense material, not on the ladder alone.**
 
-### The metric gap at low re-encode depth
+### Depth, and what governs how much artifact there is to fix
 
-What a decoder adapter buys scales with re-encode depth, and that shapes how you
-should evaluate one. Example measurements from the published checkpoint — tonal
-frames (>12 dB tonality, 6–16 kHz) on 2-minute generations, mean of 4, the
-adapter the only variable:
+What a decoder adapter buys scales with re-encode depth, so evaluate it on a
+ladder rather than on single generations. `scripts/measure_decoder_depth.py`
+runs the one below.
 
-| depth | stock | adapted | | 12–16 kHz (stock → adapted) | SI-SDR vs own d0 |
-|---|---|---|---|---|---|
-| d0 — fresh generation | 364 | 422 | −16% | −5.6 → −5.3 | — |
-| d1 — one transform or continuation | 432 | 445 | −3% | −6.2 → −5.5 | 14.7 → 18.3 |
-| d2 | 821 | 519 | **37% fewer** | −6.6 → −5.6 | 10.1 → 13.7 |
-| d3 | 1665 | 619 | **63% fewer** | −7.1 → −5.8 | 7.8 → 11.2 |
+Four base-model generations of 2 minutes on ordinary descriptive prompts,
+screened from 12 candidates by tonality runaway, the adapter the only variable:
 
-**Read the last two columns before believing the first.** A tonal-frame count can
-fall because the artifact went away *or* because the content did, and an adapter
-that quietly sands the top end will post an excellent frame count. Here it does
-not: at every depth the adapted render holds more 12–16 kHz energy than stock,
-sits marginally louder in RMS, and stays closer to its own depth-0 render
-(SI-SDR 11.2 against stock's 7.8 by d3) — so it is drifting less with depth, not
-erasing what drifts. The 8–12 kHz band does drop (+2.7 → +1.1 by d3), which is
-the band the artifact piles into.
+| depth | tonality p95 | tonal frames | 16–22 kHz | SI-SDR vs own d0 |
+|---|---|---|---|---|
+| d0 — fresh generation | 9.80 → 9.10 | 87 → 62 | 3.16 → 4.34 | — |
+| d1 — one transform or continuation | 11.82 → 9.73 | 462 → 64 | 0.95 → 3.76 | 16.9 → 21.0 |
+| d2 | 14.79 → 10.61 | 2111 → 133 | −1.36 → 3.32 | 12.4 → 16.2 |
+| d3 | 17.85 → 11.74 | 4279 → 453 | −3.36 → 2.96 | 10.1 → 13.6 |
+
+Stock tonality climbs +8.05 dB over three round trips against the adapter's
++2.64. **Read the last two columns before believing the first.** A tonal-frame
+count can fall because the artifact went away *or* because the content did, and
+an adapter that quietly sands the top end posts an excellent frame count. Here
+it does not: after three round trips the adapted render's 16–22 kHz sits 0.2 dB
+from a *fresh* stock render at unchanged RMS, while stock has lost 6.5 dB of it.
+Stock's 12–16 kHz meanwhile rises with depth, which is the invented energy
+replacing the air.
 
 Always pair a frame count at depth with a content measure. Reading the count
-alone once produced a confident "the benefit grows with depth" on an adapter that
-was, at that depth, deleting the audio.
+alone once produced a confident "the benefit grows with depth" on an adapter
+that was, at that depth, deleting the audio.
 
-**The squeak is audible at d0 by ear — hi hats and snares especially — and none
-of the metrics here show it.** Flat or slightly negative at d0: tonality p95 in
-6–16 kHz and 1–8 kHz, frame counts over 10/12/15 dB, onset-locked tonality
-excess, fp32 and fp16, two DiT LoRAs, 30 s and 120 s material.
+#### Prompt distribution governs the d0 baseline
 
-The measurement has no headroom there. About 640 of ~10,300 frames already read
-as tonal before any re-encoding, because cymbals and distorted guitar genuinely
-are tonal, so a few dozen added squeak frames cannot move a count that size.
-Separating artifact from content works at depth but not at d0 without a clean
-reference, and generated audio has none.
+How much artifact exists on a fresh generation depends mostly on how far the
+prompt sits from what the model expects. Same ladder, same seeds, same screen:
 
-Combined with the tonality detector's habit of pointing the wrong way — on SAME-S
-the clip that sounds squeakiest scores lowest — the practical rule is: **judge
-low-depth behaviour by ear, and use the metrics for depth.** If you can devise a
-reference-free measure of HF transient artifacts on generated audio, it would
-improve every screen in this document.
+| generations | tonal frames at d0 |
+|---|---|
+| base model, descriptive prompts | 87 |
+| DiT LoRA, terse genre-tag prompts | 780 |
+| base model, terse genre-tag prompts | 1649 |
+
+Genre tags are out of distribution for the base model and produce 19x the tonal
+frames of a descriptive prompt. A DiT LoRA trained on tag-style captions makes
+those tags in-distribution again and lands in between. **This matters for
+evaluation, not just for use:** an earlier version of this table was measured on
+tag-prompted material and showed the adapter *raising* the d0 frame count by
+16%, which reads as a regression and is not one. That material is already tonal
+enough that the count has no room to move, and the adapter puts genuine
+high-frequency energy back, which a peakiness detector scores as more tonal.
+
+On a screened 30 s set the adapter moves d0 tonality by −0.37 dB, which is
+nothing, while restoring 1.5 to 2.4 dB of 16–22 kHz in every generation. **At
+d0 the change is air, not squeak count.** Judge it there by ear or by top-octave
+energy; the frame count is the wrong instrument until depth ≥ 2.
+
+Combined with the tonality detector's habit of pointing the wrong way — on
+SAME-S the clip that sounds squeakiest scores lowest — the practical rule is:
+**screen on percussion-dense, in-distribution material, judge low depth by ear
+or by air, and use frame counts for depth.**
 
 ### Measurement floors — read before trusting small deltas
 
